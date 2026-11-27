@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import pid_alive
 from fafo import attribution
 from fafo.attribution import SubprocessGit, attribute
 
@@ -261,18 +262,6 @@ def test_adapter_plain_name_accepted():
     assert attribute(None, [], "my-project") == ("my-project", "adapter")
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except OSError:
-        return False
-
-
 def test_timeout_kills_whole_process_group(tmp_path: Path):
     d = tmp_path / "w"
     d.mkdir()
@@ -283,10 +272,10 @@ def test_timeout_kills_whole_process_group(tmp_path: Path):
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 0.5) is None
     child = int(pidfile.read_text())
     for _ in range(50):
-        if not _alive(child):
+        if not pid_alive(child):
             break
         time.sleep(0.05)
-    assert not _alive(child)
+    assert not pid_alive(child)
 
 
 def test_oversize_kills_whole_process_group(tmp_path: Path):
@@ -302,10 +291,10 @@ def test_oversize_kills_whole_process_group(tmp_path: Path):
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 5) is None
     child = int(pidfile.read_text())
     for _ in range(50):
-        if not _alive(child):
+        if not pid_alive(child):
             break
         time.sleep(0.05)
-    assert not _alive(child)
+    assert not pid_alive(child)
 
 
 def test_global_git_config_cannot_supply_remote(tmp_path: Path, monkeypatch):
@@ -343,7 +332,7 @@ def test_normal_exit_leaves_no_grandchild(tmp_path: Path):
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
     child = int(pidfile.read_text())
     for _ in range(60):
-        if not _alive(child):
+        if not pid_alive(child):
             break
         time.sleep(0.05)
-    assert not _alive(child)
+    assert not pid_alive(child)

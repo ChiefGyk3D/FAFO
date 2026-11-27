@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import wait_gone
 from fafo.sshro import OPS, SshError, SshHost, build_argv, default_runner, ssh_ro
 
 HOST = SshHost(alias="runner-a", key_path="/keys/id_runner", user="ci")
@@ -152,13 +153,7 @@ def test_hung_child_cut_by_deadline_and_group_killed(tmp_path):
     assert not th.is_alive(), "ssh deadline did not fire"
     assert "err" in result and result["elapsed"] < 5
     pid = int(pidfile.read_text())
-    for _ in range(40):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.05)
-    else:
+    if not wait_gone([pid]):
         os.kill(pid, 9)
         pytest.fail("child process survived the group kill")
 
@@ -187,16 +182,6 @@ def test_grep_pattern_cannot_match_its_own_command_line():
 ENV = {"PATH": os.environ["PATH"]}
 
 
-def _gone(pid: int) -> bool:
-    for _ in range(60):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
     script = _script(tmp_path, "echo hi\n")
     assert default_runner([str(script)], 5.0, ENV) == (0, b"hi\n")
@@ -213,7 +198,7 @@ def test_normal_exit_kills_grandchild_left_behind(tmp_path):
     script = _script(tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho done\n")
     assert default_runner([str(script)], 5.0, ENV) == (0, b"done\n")
     pid = int(pidfile.read_text())
-    if not _gone(pid):
+    if not wait_gone([pid]):
         os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild outlived a normally exited child")
 
@@ -228,7 +213,7 @@ def test_hung_child_and_grandchild_killed_within_deadline(tmp_path, group_kill_s
     assert len(group_kill_spy.kills()) >= 1
     assert group_kill_spy.reaped_when_killed == []
     pid = int(pidfile.read_text())
-    if not _gone(pid):
+    if not wait_gone([pid]):
         os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild survived the deadline kill")
 
