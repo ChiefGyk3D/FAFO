@@ -17,6 +17,19 @@ def child(code):
     return [sys.executable, "-c", code]
 
 
+def wait_group_gone(pgid, limit=5.0):
+    """Poll until killpg(pgid, 0) reports no member left (a zombie member still counts)."""
+    end = time.monotonic() + limit
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.02)
+
+
 def run_guarded(adapter, pidfile, limit):
     """Run enrich in a thread so a regression fails instead of hanging the suite."""
     result = {}
@@ -52,12 +65,7 @@ def test_silent_hang_times_out_stale_and_child_gone(tmp_path):
     assert out == {} and a.health == "stale"
     assert elapsed < 1.5
     assert pids and wait_gone(pids)
-    try:
-        os.killpg(pids[0], 0)
-        group_left = True
-    except ProcessLookupError:
-        group_left = False
-    assert not group_left
+    assert wait_group_gone(pids[0]), "process group still exists after the kill"
 
 
 def test_megabyte_output_cut_at_cap_and_killed(tmp_path):

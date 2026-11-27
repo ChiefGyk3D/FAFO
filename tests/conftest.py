@@ -62,8 +62,12 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
-def wait_gone(pids, limit: float = 2.0) -> bool:
-    """Poll up to `limit` seconds (short sleeps) until no pid in `pids` is alive."""
+def wait_gone(pids, limit: float = 5.0) -> bool:
+    """Poll up to `limit` seconds (short sleeps) until no pid in `pids` is alive.
+
+    SIGKILL delivery and the zombie hand-off are asynchronous, so a kill or a runner return
+    never makes a pid read gone instantly: assert through this helper, not on one probe.
+    """
     end = time.monotonic() + limit
     while True:
         if not any(pid_alive(p) for p in pids):
