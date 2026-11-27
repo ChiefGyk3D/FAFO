@@ -1,4 +1,4 @@
-# FAFO
+# FAFO: Framework Activity & Flow Observability
 
 Fuck Around and Find Out. Now with real-time telemetry.
 
