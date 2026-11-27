@@ -253,3 +253,39 @@ def test_strings_sanitized_and_no_identity_fields():
     h = make_src(p).collect(make_ctx()).host
     assert esc not in json.dumps(h) and chr(7) not in json.dumps(h)
     assert not {"hostname", "user", "ip", "mac"} & set(h)
+
+
+def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
+    from fafo.sources.host import _MIN_ENV, _run_capped
+
+    exe = write_script(tmp_path, "echo '0, n, 1, 2, 3'")
+    assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
+    kills = group_kill_spy.kills()
+    assert len(kills) == 1
+    assert group_kill_spy.events[0] == kills[0]  # no wait before the kill
+    assert group_kill_spy.reaped_when_killed == []
+
+
+def test_normal_exit_leaves_no_grandchild(tmp_path):
+    from fafo.sources.host import _MIN_ENV, _run_capped
+
+    pidfile = tmp_path / "gpid"
+    exe = write_script(
+        tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho '0, n, 1, 2, 3'"
+    )
+    assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
+    pid = int(pidfile.read_text())
+    end = time.monotonic() + 3
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        try:  # a zombie not yet reaped by init still counts as dead
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return
+        except OSError:
+            return
+        time.sleep(0.05)
+    os.kill(pid, 9)
+    raise AssertionError("grandchild survived a normal exit")

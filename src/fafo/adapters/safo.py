@@ -25,12 +25,12 @@ import json
 import os
 import re
 import selectors
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 
 from fafo.adapters.base import Enrichment, clean
+from fafo.procutil import kill_and_reap, wait_exited_unreaped
 
 MAX_OUTPUT = 256 * 1024
 MAX_DEPTH = 8
@@ -102,19 +102,14 @@ def _default_runner(argv: Sequence[str], timeout_s: float, env: Mapping[str, str
                     break
                 buf += chunk
         if len(buf) <= MAX_OUTPUT:
-            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if not wait_exited_unreaped(proc, deadline - time.monotonic()):
+                raise subprocess.TimeoutExpired(list(argv), timeout_s)
+            kill_and_reap(proc)  # exited: kill any grandchild, then reap
         return bytes(buf)
     finally:
-        try:  # before reaping, so the group id cannot have been reused
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_and_reap(proc)  # kill the group before the reap, never after
         if proc.stdout is not None:
             proc.stdout.close()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 class SafoAdapter:

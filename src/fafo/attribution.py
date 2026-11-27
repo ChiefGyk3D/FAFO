@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import re
 import select
-import signal
 import subprocess
 import threading
 import time
@@ -20,6 +19,8 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from typing import Protocol
 from urllib.parse import urlsplit
+
+from fafo.procutil import kill_and_reap, wait_exited_unreaped
 
 GIT_TIMEOUT_S = 2.0
 CACHE_TTL_S = 30.0
@@ -66,14 +67,7 @@ class SubprocessGit:
         try:
             return _read_capped(proc, timeout)
         finally:
-            try:  # before reaping, so the group id cannot have been reused
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                pass
+            kill_and_reap(proc, 1.0)  # kill the group before the reap, never after
             if proc.stdout is not None:
                 proc.stdout.close()
 
@@ -96,12 +90,11 @@ def _read_capped(proc: subprocess.Popen[bytes], timeout: float) -> str | None:
         buf += chunk
         if len(buf) > MAX_OUTPUT:
             return None
-    remaining = deadline - time.monotonic()
-    try:
-        code = proc.wait(timeout=max(remaining, 0.01))
-    except subprocess.TimeoutExpired:
+    if not wait_exited_unreaped(proc, max(deadline - time.monotonic(), 0.01)):
         return None
-    if code != 0:
+    kill_and_reap(proc, 1.0)  # exited: kill any grandchild, then reap
+    code = proc.returncode
+    if code is None or code != 0:
         return None
     return buf.decode("utf-8", errors="replace").strip()
 
