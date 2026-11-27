@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 
 import pytest
+from claude_helpers import LIVE, ctx, make_dir, source
 
 from fafo import transcript
 from fafo.config import ConfigError, load_config
 from fafo.registry import build_sources
-from tests.test_sources_claude import LIVE, ctx, make_dir, source
 
 SID_BUSY = "aaaaaaaa-0000-4000-8000-000000000001"
 SID_WAIT = "aaaaaaaa-0000-4000-8000-000000000003"

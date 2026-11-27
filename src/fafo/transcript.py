@@ -5,7 +5,7 @@ regular file the effective user owns, keeps one label of at most 80 characters, 
 nothing: not a path, not a label, not a line.
 
 Modes: "off" (no label), "activity" (default: tool name plus a minimal object such as the
-first word of a command or a file basename) and "prompt" (opt-in: the start of the last
+first word of a command or a file basename, with an age suffix after 120 s) and "prompt" (opt-in: the start of the last
 human message, credential-masked).
 """
 
@@ -28,7 +28,8 @@ MAX_DIRS = 2000
 MAX_DEPTH = 32
 MAX_LABEL = 80
 PROMPT_CHARS = 60
-IDLE_AFTER_S = 120.0
+IDLE_AFTER_S = 120.0  # older than this, the label gets an age suffix
+MAX_MINUTES = 99
 CACHE_MAX = 512
 ELLIPSIS = "..."
 
@@ -207,8 +208,16 @@ def _remember(key: tuple[str, str], value: tuple[int, int, float, str | None]) -
         _cache.popitem(last=False)
 
 
-def _final(text: str) -> str:
-    return sanitize_text(" ".join(text.split()), MAX_LABEL)
+def _final(text: str, cap: int) -> str:
+    return sanitize_text(" ".join(text.split()), cap)
+
+
+def _age_suffix(age_s: float) -> str:
+    """A suffix like ' (5m ago)' once the last tool_use is older than IDLE_AFTER_S. Never 'idle'."""
+    if not age_s > IDLE_AFTER_S:
+        return ""
+    minutes = int(age_s // 60)
+    return f" ({minutes}m ago)" if minutes <= MAX_MINUTES else f" (>{MAX_MINUTES}m ago)"
 
 
 def task_label(session_id: str, projects_dir: Path, mode: str, now: float) -> str:
@@ -243,6 +252,5 @@ def _task_label(sid: str, projects: Path, mode: str, now: float) -> str:
         _remember(key, (fst.st_size, fst.st_mtime_ns, mtime, raw))
     if raw is None:
         return ""
-    if mode == "activity" and now - mtime > IDLE_AFTER_S:
-        return "idle"
-    return _final(raw)
+    suffix = _age_suffix(now - mtime) if mode == "activity" else ""
+    return _final(raw, MAX_LABEL - len(suffix)) + suffix

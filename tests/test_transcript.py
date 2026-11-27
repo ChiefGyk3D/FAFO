@@ -120,15 +120,46 @@ def test_task_agent_subagent_type(tmp_path):
     assert label(tmp_path) == "Agent"
 
 
-def test_idle_after_120_seconds(tmp_path):
+def test_age_suffix_just_under_and_over_120_seconds(tmp_path):
     put(tmp_path, [tool("Bash", command="make")], mtime=T0)
-    assert label(tmp_path, now=T0 + 119) == "Bash: make"
-    assert label(tmp_path, now=T0 + 121) == "idle"
+    assert label(tmp_path, now=T0 + 119.9) == "Bash: make"
+    assert label(tmp_path, now=T0 + 120) == "Bash: make"
+    assert label(tmp_path, now=T0 + 121) == "Bash: make (2m ago)"
+
+
+def test_age_suffix_minutes_and_cap(tmp_path):
+    put(tmp_path, [tool("Edit", file_path="/a/w.py")], mtime=T0)
+    assert label(tmp_path, now=T0 + 59 * 60 + 30) == "Edit: w.py (59m ago)"
+    assert label(tmp_path, now=T0 + 99 * 60 + 59) == "Edit: w.py (99m ago)"
+    assert label(tmp_path, now=T0 + 100 * 60) == "Edit: w.py (>99m ago)"
+    assert label(tmp_path, now=T0 + 10**7) == "Edit: w.py (>99m ago)"
+
+
+def test_age_suffix_survives_the_80_character_cap(tmp_path):
+    long_name = "nnnnnnnnn." * 12 + "py"  # dots keep it from looking like a credential run
+    put(tmp_path, [tool("Edit", file_path="/a/" + long_name)], mtime=T0)
+    got = label(tmp_path, now=T0 + 3600)
+    assert len(got) == 80
+    assert got.endswith(" (60m ago)")
+    assert got.startswith("Edit: nnn")
+    assert "idle" not in got
+
+
+def test_cached_label_gets_a_later_suffix(tmp_path):
+    put(tmp_path, [tool("Bash", command="make")], mtime=T0)
+    assert label(tmp_path, now=T0 + 10) == "Bash: make"
+    assert label(tmp_path, now=T0 + 600) == "Bash: make (10m ago)"
+
+
+def test_prompt_mode_has_no_age_suffix(tmp_path):
+    put(tmp_path, [human("hello there")], mtime=T0)
+    assert label(tmp_path, "prompt", now=T0 + 9000) == "hello there"
 
 
 def test_no_tool_use_returns_empty(tmp_path):
     put(tmp_path, [human("hello there")])
     assert label(tmp_path) == ""
+    assert label(tmp_path, now=T0 + 99999) == ""
 
 
 def test_most_recent_tool_use_wins(tmp_path):
@@ -310,12 +341,6 @@ def test_cache_avoids_rereading_unchanged_file(tmp_path, monkeypatch):
     os.utime(f, (T0 + 1, T0 + 1))
     assert label(tmp_path, now=T0 + 3) == "Grep"
     assert sum(p.endswith(".jsonl") for p in opens) == first + 1
-
-
-def test_cached_label_still_turns_idle(tmp_path):
-    put(tmp_path, [tool("Bash", command="make")], mtime=T0)
-    assert label(tmp_path, now=T0 + 10) == "Bash: make"
-    assert label(tmp_path, now=T0 + 500) == "idle"
 
 
 def test_cache_is_bounded(tmp_path):

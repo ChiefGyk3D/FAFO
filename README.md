@@ -81,7 +81,8 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
 The TASK column of a Claude session shows what it is doing. By default (`task_labels =
 "activity"` under `[sources.claude]`) that is the last tool plus a minimal object, such as
 `Bash: make` (first word of the command only) or `Edit: widget.py` (file name only), read from
-the last 64 KB of the session transcript and capped at 80 characters. `"off"` shows the state
+the last 64 KB of the session transcript and capped at 80 characters. When that tool call is more than two minutes old the label gets an
+age suffix such as `(5m ago)`. `"off"` shows the state
 only. `"prompt"` shows the first 60 characters of your last message, credential-masked; it may
 put your own prompt text on screen and in screenshots, so it is opt-in.
 
