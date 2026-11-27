@@ -1,0 +1,11 @@
+{
+  "name": "fafo-pane-typecheck",
+  "private": true,
+  "description": "Type-check only. The mod itself has no runtime dependencies.",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
