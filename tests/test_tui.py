@@ -714,7 +714,7 @@ def test_no_network_subprocess_or_clipboard_code():
     assert forbidden_in("import subprocess") == ["subprocess"]
     assert forbidden_in("app.copy_to_clipboard(x)") == ["clipboard"]
     assert forbidden_in(src) == []
-    assert "—" not in src  # no em dash
+    assert chr(0x2014) not in src  # no em dash
 
 
 def test_quits_on_q(snap_path):
