@@ -1,6 +1,7 @@
 import json
 import stat
 import threading
+from dataclasses import fields
 from pathlib import Path
 
 from fafo.model import (
@@ -327,3 +328,265 @@ def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
     nest = "[" * 5000 + "1.5" + "]" * 5000
     path = _tampered(tmp_path, '"load":4.1', f'"load":{nest}')
     assert read_snapshot(path) is None
+
+
+def test_project_source_roundtrip_and_old_snapshot_defaults_live(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"
+    path2, doc = _doc(tmp_path)
+    doc["sessions"][0].pop("project_source", None)
+    path2.write_text(json.dumps(doc))
+    got = read_snapshot(path2)
+    assert got is not None and got.sessions[0].project_source == "live"
+
+
+def test_bad_project_source_rejected(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    doc["sessions"][0]["project_source"] = "bogus"
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
+
+
+def _strict_load(path: Path):
+    def refuse(name):
+        raise AssertionError(f"non-standard JSON constant {name}")
+
+    return json.loads(path.read_bytes(), parse_constant=refuse)
+
+
+def test_write_nonfinite_in_nested_dicts_roundtrips_as_null(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {"a": float("nan"), "b": [float("inf"), {"c": float("-inf")}], "ok": 1.5}
+    snap.quota = {"claude": {"5h": float("nan")}}
+    snap.llm.gpu = {"util": float("inf")}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    doc = _strict_load(path)
+    assert doc["host"] == {"a": None, "b": [None, {"c": None}], "ok": 1.5}
+    back = read_snapshot(path)
+    assert back is not None
+    assert back.host == doc["host"]
+    assert back.quota == {"claude": {"5h": None}}
+    assert back.llm.gpu == {"util": None}
+
+
+def test_write_nonfinite_in_stamped_field_writes_strict_json(tmp_path: Path):
+    snap = make_snapshot()
+    snap.sessions[0].project = Stamped("demo", float("nan"))
+    snap.procs[0].cpu = float("inf")
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # must not raise
+    doc = _strict_load(path)
+    assert doc["sessions"][0]["project"]["as_of"] is None
+    assert doc["procs"][0]["cpu"] is None
+    # a typed field that became null is refused by the reader, cleanly
+    assert read_snapshot(path) is None
+
+
+def test_write_deeply_nested_value_does_not_raise_and_reads_back(tmp_path: Path):
+    deep: list = []
+    cur = deep
+    for _ in range(5000):
+        nxt: list = []
+        cur.append(nxt)
+        cur = nxt
+    snap = make_snapshot()
+    snap.host = {"deep": deep}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    back = read_snapshot(path)
+    assert back is not None
+    depth = 0
+    node = back.host["deep"]
+    while node is not None:
+        depth += 1
+        node = node[0]
+    assert 1 <= depth <= 32
+
+
+def test_write_huge_structure_is_capped(tmp_path: Path):
+    snap = make_snapshot()
+    snap.quota = {"big": list(range(200_000))}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    doc = _strict_load(path)
+    big = doc["quota"]["big"]
+    assert 0 < len(big) < 100_000
+    assert big[0] == 0 and None not in big
+    assert read_snapshot(path) is not None
+
+
+def test_write_logs_count_only_no_values(tmp_path: Path, caplog):
+    snap = make_snapshot()
+    snap.host = {"secret-key": float("nan"), "x": float("inf")}
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(tmp_path / "snap.json", snap)
+    text = caplog.text
+    assert "2" in text
+    assert "secret-key" not in text and "nan" not in text.lower().replace("snapshot", "")
+
+
+def test_write_nonfinite_keeps_mode_and_leaves_no_temp_files(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {"a": float("nan")}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+    assert [p.name for p in tmp_path.iterdir()] == ["snap.json"]
+
+
+def test_write_huge_ints_become_null_and_boundary_kept(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {
+        "a": {"big": 10**5000, "neg": -(10**5000), "max": 2**63 - 1, "over": 2**63},
+        "l": [10**5000],
+    }
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # must not raise
+    back = read_snapshot(path)
+    assert back is not None
+    assert back.host["a"] == {"big": None, "neg": None, "max": 2**63 - 1, "over": None}
+    assert back.host["l"] == [None]
+
+
+def test_reader_refuses_wide_ints_consistently(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, make_snapshot())
+    text = path.read_text().replace('"load":4.1', '"load":' + str(2**63))
+    path.write_text(text)
+    assert read_snapshot(path) is None
+    path.write_text(text.replace(str(2**63), str(2**63 - 1)))
+    assert read_snapshot(path) is not None
+
+
+class _TripList(list):
+    """List whose iteration raises if more than LIMIT elements are pulled."""
+
+    LIMIT = 100_001
+
+    def __iter__(self):
+        for i in range(10**9):
+            if i > self.LIMIT:
+                raise AssertionError("iterated past the cap")
+            yield i
+
+
+class _TripDict(dict):
+    def items(self):
+        for i in range(10**9):
+            if i > _TripList.LIMIT:
+                raise AssertionError("iterated past the cap")
+            yield f"k{i}", i
+
+    def __iter__(self):
+        raise AssertionError("dict iterated directly")
+
+
+def test_write_caps_lazily_never_materializing_a_huge_container(tmp_path: Path):
+    snap = make_snapshot()
+    snap.quota = {"l": _TripList(), "d": _TripDict()}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # AssertionError here would mean unbounded iteration
+    doc = _strict_load(path)
+    n_l, n_d = len(doc["quota"]["l"]), len(doc["quota"]["d"])
+    assert n_l + n_d < 100_000 and max(n_l, n_d) > 0
+
+
+FLOAT_FIELDS = [
+    ("taken", lambda d: d),
+    ("as_of", lambda d: d["sessions"][0]["project"]),
+    ("started", lambda d: d["sessions"][0]),
+    ("cpu", lambda d: d["sessions"][0]),
+    ("started", lambda d: d["procs"][0]),
+    ("cpu", lambda d: d["procs"][0]),
+    ("expires", lambda d: d["llm"]["models"][0]),
+    ("started", lambda d: d["llm"]["inflight"][0]),
+    ("elapsed", lambda d: d["runners"][0]),
+    ("load", lambda d: d["runners"][0]),
+    ("mem", lambda d: d["runners"][0]),
+    ("disk", lambda d: d["runners"][0]),
+    ("last_ok", lambda d: d["health"][0]),
+]
+
+
+def _good_doc(tmp_path: Path) -> dict:
+    p = tmp_path / "good.json"
+    write_snapshot(p, make_snapshot())
+    return json.loads(p.read_text())
+
+
+def test_huge_ints_in_every_typed_float_field_refuse_cleanly(tmp_path: Path):
+    path = tmp_path / "bad.json"
+    for name, locate in FLOAT_FIELDS:
+        for bad in (2**1024, 10**400, -(2**1024)):
+            doc = _good_doc(tmp_path)
+            locate(doc)[name] = bad
+            path.write_text(json.dumps(doc))
+            assert read_snapshot(path) is None, (name, bad)
+
+
+def test_writer_scrubs_huge_int_in_typed_float_field(tmp_path: Path):
+    snap = make_snapshot()
+    snap.procs[0].cpu = 10**400
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    assert _strict_load(path)["procs"][0]["cpu"] is None
+    assert read_snapshot(path) is None  # typed field became null: refused, not raised
+
+
+def test_read_never_raises_on_seeded_mutations(tmp_path: Path):
+    import random
+
+    rng = random.Random(64)
+    path = tmp_path / "fuzz.json"
+    junk = [2**1024, 10**400, 2**63, True, False, -1, 1e308, "x", None, [], {}, "@@1e999@@"]
+
+    def leaves(node, trail=()):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from leaves(v, (*trail, k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from leaves(v, (*trail, i))
+        else:
+            yield trail
+
+    for _ in range(300):
+        doc = _good_doc(tmp_path)
+        for _ in range(rng.randint(1, 3)):
+            trail = rng.choice(list(leaves(doc)))
+            if not trail:
+                continue
+            node = doc
+            for k in trail[:-1]:
+                node = node[k]
+            node[trail[-1]] = rng.choice(junk)
+        path.write_text(json.dumps(doc).replace('"@@1e999@@"', "1e999"))
+        result = read_snapshot(path)  # must not raise
+        assert result is None or isinstance(result, Snapshot)
+
+
+def test_sanitize_warning_wording_and_no_values(tmp_path: Path, caplog):
+    snap = make_snapshot()
+    snap.host = {"secret-key": float("nan"), 7: "dropped-key-value", "x": 10**400}
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(tmp_path / "snap.json", snap)
+    msgs = [r.getMessage() for r in caplog.records if r.name == "fafo.store"]
+    assert msgs == ["snapshot: sanitized 3 values (nulled, dropped or truncated)"]
+
+
+def test_default_live_snapshot_has_the_pre_project_source_key_set(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    old = {f.name for f in fields(Session)} - {"project_source"}
+    for s in doc["sessions"]:
+        assert set(s) == old
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    assert json.loads(path.read_text())["sessions"][0]["project_source"] == "last"
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"

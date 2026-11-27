@@ -1,24 +1,31 @@
-"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix."""
+"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix.
+
+Strict schema: a session's `project_source` key is written only when it is not "live". The reader
+accepts both forms, but an older reader refuses a snapshot that contains a last-known or folder
+project (it rejects unknown keys) by design; SNAPSHOT_VERSION is deliberately not bumped for this.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import stat
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 from typing import get_args
 
-from .jsonsafe import check_finite
+from .jsonsafe import MAX_INT_BITS, check_finite, plain_copy
 from .model import (
     SNAPSHOT_VERSION,
     Inflight,
     LlmServer,
     LoadedModel,
     Proc,
+    ProjectSource,
     Runner,
     Session,
     Snapshot,
@@ -26,6 +33,8 @@ from .model import (
     Stamped,
     Status,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _ensure_dir(directory: Path) -> None:
@@ -48,6 +57,17 @@ def ensure_private_dir(directory: Path) -> None:
     _ensure_dir(Path(directory))
 
 
+def _omit_default_source(plain) -> None:
+    """Leave out the default project_source ("live") so a snapshot with no last-known project keeps
+    the exact key set older readers accept. A snapshot that does carry one (idle session showing its
+    last repo, or a folder name) is refused by older readers by design: the schema is strict."""
+    sessions = plain.get("sessions") if isinstance(plain, dict) else None
+    if isinstance(sessions, list):
+        for s in sessions:
+            if isinstance(s, dict) and s.get("project_source") == "live":
+                del s["project_source"]
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -57,7 +77,13 @@ def write_snapshot(
     """
     path = Path(path)
     ensure_private_dir(path.parent)
-    payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
+    # Iterative, capped walk: NaN, infinities and over-deep or over-large values become null, so
+    # the file is strict JSON that read_snapshot accepts. Log the count only, never the values.
+    plain, replaced = plain_copy(snap)
+    if replaced:
+        _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
+    _omit_default_source(plain)
+    payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -77,7 +103,7 @@ def write_snapshot(
 
 
 def _int(v):
-    if type(v) is not int or v < 0:
+    if type(v) is not int or v < 0 or v.bit_length() > MAX_INT_BITS:
         raise TypeError("expected non-negative int")
 
 
@@ -87,6 +113,8 @@ def _opt_int(v):
 
 
 def _float(v):
+    if type(v) is int and v.bit_length() > MAX_INT_BITS:
+        raise TypeError("expected finite number")  # before math.isfinite: it overflows on big ints
     if type(v) not in (int, float) or not math.isfinite(v):
         raise TypeError("expected finite number")
 
@@ -111,6 +139,11 @@ def _status(v):
         raise TypeError("bad status")
 
 
+def _project_source(v):
+    if type(v) is not str or v not in get_args(ProjectSource):
+        raise TypeError("bad project_source")
+
+
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
 _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
@@ -130,9 +163,9 @@ _SPEC = {
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
     "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
-    "rss": _int, "name": _str, "address": _str,
+    "rss": _int, "name": _str, "address": _str, "project_source": _project_source,
 }
-_SESSION_OPTIONAL = {"name": "", "address": ""}  # absent in older snapshots
+_SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live"}  # absent in older snapshots
 
 
 def _check(cls, data, spec):
@@ -211,5 +244,9 @@ def read_snapshot(path: Path) -> Snapshot | None:
     try:
         doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
         return _snapshot(doc)
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+    except (
+        OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
+        ArithmeticError, RecursionError,
+    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
+        _log.debug("snapshot unreadable: %s", type(exc).__name__)
         return None
