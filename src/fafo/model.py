@@ -7,7 +7,12 @@ from typing import Generic, Literal, TypeVar
 
 T = TypeVar("T")
 
-SNAPSHOT_VERSION = 1
+# 2: Snapshot.llms (several local LLM servers) and LlmServer.name/last_ok/reachable. The file
+# still carries "llm" (the first server) for older readers. Version 1 files are still read.
+SNAPSHOT_VERSION = 2
+OLD_SNAPSHOT_VERSION = 1
+DEFAULT_LLM_NAME = "ollama"
+MAX_LLM_SERVERS = 8
 
 Status = Literal["ok", "stale", "down", "absent"]
 
@@ -71,6 +76,11 @@ class LlmServer:
     queue: int
     inflight: list[Inflight]
     gpu: dict
+    # Which server these rows describe; time of the last good poll (0.0 = never);
+    # False when the latest poll failed (the rows are then the last good ones, kept).
+    name: str = DEFAULT_LLM_NAME
+    last_ok: float = 0.0
+    reachable: bool = True
 
 
 @dataclass
@@ -104,7 +114,12 @@ class Snapshot:
     host: dict
     sessions: list[Session] = field(default_factory=list)
     procs: list[Proc] = field(default_factory=list)
-    llm: LlmServer | None = None
+    llms: list[LlmServer] = field(default_factory=list)
     runners: list[Runner] = field(default_factory=list)
     quota: dict = field(default_factory=dict)
     health: list[SourceHealth] = field(default_factory=list)
+
+    @property
+    def llm(self) -> LlmServer | None:
+        """The first server, for readers written before several servers were supported."""
+        return self.llms[0] if self.llms else None

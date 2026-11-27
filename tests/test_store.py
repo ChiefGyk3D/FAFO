@@ -3,7 +3,10 @@ import stat
 import threading
 from pathlib import Path
 
+import pytest
+
 from fafo.model import (
+    SNAPSHOT_VERSION,
     Inflight,
     LlmServer,
     LoadedModel,
@@ -50,12 +53,12 @@ def make_snapshot(taken: float = 1000.0) -> Snapshot:
     )
     health = SourceHealth(name="claude", status="ok", last_ok=taken, error="")
     return Snapshot(
-        version=1,
+        version=SNAPSHOT_VERSION,
         taken=taken,
         host={"load": 4.1},
         sessions=[session],
         procs=[proc],
-        llm=llm,
+        llms=[llm],
         runners=[runner],
         quota={"claude": {"5h": 0.41}},
         health=[health],
@@ -79,7 +82,7 @@ def test_roundtrip_equal(tmp_path: Path):
 def test_roundtrip_without_llm(tmp_path: Path):
     path = tmp_path / "snap.json"
     snap = make_snapshot()
-    snap = Snapshot(**{**snap.__dict__, "llm": None})
+    snap = Snapshot(**{**snap.__dict__, "llms": []})
     write_snapshot(path, snap)
     assert read_snapshot(path) == snap
 
@@ -107,10 +110,10 @@ def test_unknown_major_version_returns_none(tmp_path: Path):
     path = tmp_path / "snap.json"
     write_snapshot(path, make_snapshot())
     doc = json.loads(path.read_text())
-    doc["version"] = 2
+    doc["version"] = 3
     path.write_text(json.dumps(doc))
     assert read_snapshot(path) is None
-    doc["version"] = 1
+    doc["version"] = 2
     path.write_text(json.dumps(doc))
     assert read_snapshot(path) is not None
 
@@ -305,7 +308,8 @@ def _tampered(tmp_path: Path, old: str, new: str) -> Path:
     path = tmp_path / "snap.json"
     write_snapshot(path, make_snapshot())
     text = path.read_text(encoding="utf-8")
-    assert text.count(old) == 1  # the fixture really contains the value being replaced
+    # the fixture really contains the value; llm values appear twice ("llm" copies llms[0])
+    assert 1 <= text.count(old) <= 2
     path.write_text(text.replace(old, new), encoding="utf-8")
     return path
 
@@ -326,4 +330,76 @@ def test_nonfinite_numbers_rejected_everywhere(tmp_path: Path):
 def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
     nest = "[" * 5000 + "1.5" + "]" * 5000
     path = _tampered(tmp_path, '"load":4.1', f'"load":{nest}')
+    assert read_snapshot(path) is None
+
+
+def two_servers() -> Snapshot:
+    snap = make_snapshot()
+    a = snap.llms[0]
+    a.name, a.last_ok = "alpha", 990.0
+    b = LlmServer(
+        models=[LoadedModel(name="m2", vram=5, context=4096, expires=0.0)],
+        queue=3, inflight=[], gpu={}, name="beta", last_ok=0.0, reachable=False,
+    )
+    return Snapshot(**{**snap.__dict__, "llms": [a, b]})
+
+
+def test_roundtrip_two_servers_and_llm_is_the_first(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    snap = two_servers()
+    write_snapshot(path, snap)
+    got = read_snapshot(path)
+    assert got == snap
+    assert [s.name for s in got.llms] == ["alpha", "beta"] and not got.llms[1].reachable
+    assert got.llm is got.llms[0]
+    assert json.loads(path.read_bytes())["llm"]["name"] == "alpha"  # older readers see this
+    assert json.loads(path.read_bytes())["version"] == 2
+
+
+def test_reads_the_old_schema_version_1(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    doc = {
+        "version": 1, "taken": 1000.0, "host": {}, "sessions": [], "procs": [],
+        "llm": {"models": [{"name": "m", "vram": 1, "context": 2, "expires": 0.0}],
+                "queue": 1, "inflight": [], "gpu": {}},
+        "runners": [], "quota": {}, "health": [],
+    }
+    path.write_text(json.dumps(doc))
+    got = read_snapshot(path)
+    assert got is not None and [s.name for s in got.llms] == ["ollama"]
+    assert got.llm.models[0].name == "m" and got.llm.reachable and got.llm.last_ok == 0.0
+    doc["llm"] = None
+    path.write_text(json.dumps(doc))
+    got = read_snapshot(path)
+    assert got is not None and got.llms == [] and got.llm is None
+
+
+def test_version_1_with_llms_field_is_refused(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, two_servers())
+    doc = json.loads(path.read_bytes())
+    doc["version"] = 1
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
+
+
+@pytest.mark.parametrize(
+    "mut",
+    [
+        lambda d: d["llms"][1].update(name=7),
+        lambda d: d["llms"][1].update(name="x" * 101),
+        lambda d: d.update(llm=None),
+        lambda d: d["llms"][1].update(reachable="yes"),
+        lambda d: d["llms"][1].update(last_ok=float("nan")),
+        lambda d: d["llms"][1].pop("name"),
+        lambda d: d.update(llms={}),
+        lambda d: d["llms"].extend([d["llms"][0]] * 8),
+    ],
+)
+def test_bad_llms_rejected(tmp_path: Path, mut):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, two_servers())
+    doc = json.loads(path.read_bytes())
+    mut(doc)
+    path.write_text(json.dumps(doc, allow_nan=True))
     assert read_snapshot(path) is None

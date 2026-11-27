@@ -63,12 +63,12 @@ def golden_snapshot() -> Snapshot:
             proc(500, None, agent="codex", cmd="codex exec"),
             proc(501, None, agent="gemini", cmd="gemini"),
         ],
-        llm=LlmServer(
+        llms=[LlmServer(
             models=[LoadedModel("model-a:12b", 8 * 1024**3, 128000, NOW + 240)],
             queue=0,
             inflight=[Inflight("model-a:12b", 100, NOW - 5)],
             gpu={},
-        ),
+        )],
         runners=[
             Runner("r1", "busy", "owner/repo", "ci", "build", "compile", 3, 7, 130.0, 3.2, 61.0, -1.0),
             Runner("r2", "idle", "", "", "", "", 0, 0, 0.0, -1.0, -1.0, -1.0),
@@ -232,3 +232,34 @@ def test_format_json_nonfinite_age_and_deep_nesting_do_not_raise():
     snap.host["deep"] = deep
     snap.taken = float("nan")
     _strict(format_json(snap, NOW))
+
+
+def _two_server_snapshot() -> Snapshot:
+    s = golden_snapshot()
+    a = s.llms[0]
+    a.name, a.last_ok = "gpu-box", NOW - 1
+    b = LlmServer(
+        models=[LoadedModel("model-b:4b", 3 * 1024**3, 8192, NOW + 60)],
+        queue=4, inflight=[Inflight("model-b:4b", None, NOW - 5)], gpu={},
+        name="laptop", last_ok=NOW - 120, reachable=False,
+    )
+    s.llms = [a, b]
+    return s
+
+
+def test_table_shows_every_server_labeled_with_models_queue_inflight():
+    out = format_table(views(_two_server_snapshot()), 144)
+    assert "gpu-box" in out and "laptop" in out
+    assert "model-a:12b" in out and "model-b:4b" in out
+    lines = out.splitlines()
+    i = next(n for n, line in enumerate(lines) if "laptop" in line)
+    block = "\n".join(lines[i : i + 5])
+    assert "queue 4" in block and "in-flight 1" in block
+    assert "~2m" in lines[i]  # the dead server is marked with its own age, not the snapshot's
+    j = next(n for n, line in enumerate(lines) if "gpu-box" in line)
+    assert "~" not in lines[j]  # the live one is not marked
+
+
+def test_table_single_default_server_is_unchanged_golden():
+    # the golden fixture has one server named "ollama": no label line is added
+    assert "ollama" not in format_table(views(), 144).split("LOCAL LLM")[1].split("RUNNERS")[0]

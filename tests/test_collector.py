@@ -475,3 +475,45 @@ def test_views_failure_counter_starts_at_zero_and_stays_on_success(tmp_path):
     with Running(col):
         wait_for(cfg.snapshot_path.with_name("views.json").exists)
     assert col.views_write_failures == 0
+
+
+def test_one_failing_ollama_server_never_blanks_the_others_in_the_snapshot(tmp_path):
+    import json as _json
+
+    from fafo.sources.ollama import HttpResponse, OllamaSource, ServerSpec
+
+    down: set[str] = set()
+
+    def http(url, timeout, max_bytes):
+        base = url.rsplit("/api/", 1)[0]
+        if base in down:
+            raise OSError("refused")
+        if url.endswith("/api/version"):
+            return HttpResponse(200, b"{}")
+        name = "m-" + base.split("//")[1].split(".")[0]
+        return HttpResponse(200, _json.dumps({"models": [{"name": name}]}).encode())
+
+    src = OllamaSource(
+        servers=[ServerSpec("alpha", "http://a.example.invalid"),
+                 ServerSpec("beta", "http://b.example.invalid")],
+        http=http,
+    )
+    cfg = make_cfg(tmp_path, ollama=fast())
+    col = Collector(cfg, [src], cfg.snapshot_path)
+    col._poll(col._states[0])
+    assert [s.name for s in col.snapshot().llms] == ["alpha", "beta"]
+    down.add("http://b.example.invalid")
+    time.sleep(0.45)  # past beta's backoff window (interval 0.1 s, one failure)
+    col._poll(col._states[0])
+    snap = col.snapshot()
+    by = {s.name: s for s in snap.llms}
+    assert set(by) == {"alpha", "beta"}
+    assert [m.name for m in by["alpha"].models] == ["m-a"] and by["alpha"].reachable
+    assert [m.name for m in by["beta"].models] == ["m-b"] and not by["beta"].reachable
+    assert snap.llm is snap.llms[0]
+    assert snap.health[0].status == "stale"
+    down.add("http://a.example.invalid")  # now every server is down: the source goes down,
+    time.sleep(0.45)  # but the last good rows of both servers stay in the snapshot
+    col._poll(col._states[0])
+    assert col.snapshot().health[0].status == "down"
+    assert {s.name for s in col.snapshot().llms} == {"alpha", "beta"}

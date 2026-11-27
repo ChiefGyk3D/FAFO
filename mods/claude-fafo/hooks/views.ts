@@ -103,6 +103,16 @@ export type IndexRow = {
   state: string
 }
 export type Model = { name: string; vram: string; context: string; expires: string }
+export type Llm = {
+  name: string
+  label: boolean
+  models: Model[]
+  queue: number | null
+  inflight: number
+  gpu: string
+  stale: boolean
+  age: string
+}
 export type Runner = {
   name: string
   state: string
@@ -120,18 +130,33 @@ export type Views = {
   sessions: Sess[]
   sessionsHidden: number
   unattached: Group[]
-  llm: {
-    models: Model[]
-    queue: number | null
-    inflight: number
-    gpu: string
-    stale: boolean
-  } | null
+  llm: Llm | null // the first server (the field older files carry alone)
+  llms: Llm[]
   runners: Runner[]
   quota: string[]
   index: IndexRow[]
   indexTruncated: boolean
   indexHidden: number
+}
+
+const MAX_LLMS = 8
+
+function llmOf(o: Record<string, unknown>): Llm {
+  return {
+    name: clean(o.name, 32),
+    label: o.label === true,
+    models: rows(o.models, MAX_LIST).map(m => ({
+      name: clean(m.name, 40),
+      vram: clean(m.vram, 12),
+      context: clean(m.context, 12),
+      expires: clean(m.expires, 12),
+    })),
+    queue: num(o.queue),
+    inflight: Array.isArray(o.inflight) ? o.inflight.length : 0,
+    gpu: clean(o.gpu, 16),
+    stale: o.stale === true,
+    age: clean(o.age, 12),
+  }
 }
 
 function child(o: Record<string, unknown>): Child {
@@ -186,7 +211,9 @@ export function parseViews(text: string): ParseResult {
     return { ok: false, kind: 'schema', schema: clean(raw, 12) }
   }
   const host = obj(top.host)
-  const llm = obj(top.llm)
+  // Newer files carry every server in `llms`; an older file has only `llm` (one server).
+  const llmRows = Array.isArray(top.llms) ? rows(top.llms, MAX_LLMS) : [obj(top.llm)]
+  const llms: Llm[] = llmRows.flatMap(o => (o ? [llmOf(o)] : []))
   const views: Views = {
     generated: num(top.generated),
     status: clean(top.status, 16),
@@ -209,20 +236,8 @@ export function parseViews(text: string): ParseResult {
       sessions: rows(g.sessions, MAX_SESSIONS).map(sess),
       hidden: Math.max(0, Math.floor(num(g.hidden) ?? 0)),
     })),
-    llm: llm
-      ? {
-          models: rows(llm.models, MAX_LIST).map(m => ({
-            name: clean(m.name, 40),
-            vram: clean(m.vram, 12),
-            context: clean(m.context, 12),
-            expires: clean(m.expires, 12),
-          })),
-          queue: num(llm.queue),
-          inflight: Array.isArray(llm.inflight) ? llm.inflight.length : 0,
-          gpu: clean(llm.gpu, 16),
-          stale: llm.stale === true,
-        }
-      : null,
+    llm: llms[0] ?? null,
+    llms,
     runners: rows(top.runners, MAX_LIST).map(r => ({
       name: clean(r.name, 32),
       state: clean(r.state, 16),

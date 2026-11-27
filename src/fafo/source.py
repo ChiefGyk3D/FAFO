@@ -27,7 +27,8 @@ class SourceResult:
     sessions: list[Session] = field(default_factory=list)
     procs: list[Proc] = field(default_factory=list)
     runners: list[Runner] = field(default_factory=list)
-    llm: LlmServer | None = None
+    llms: list[LlmServer] = field(default_factory=list)
+    llm: LlmServer | None = None  # older single-server form; llms wins when both are set
     host: dict = field(default_factory=dict)
     quota: dict = field(default_factory=dict)
     status: Status | None = None

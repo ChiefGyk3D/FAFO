@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import SOURCE_NAMES, Config, ConfigError, SourceCfg
 from .ghapi import GhClient
+from .model import DEFAULT_LLM_NAME
 from .redact import sanitize_text
 from .source import Source
 from .sources.claude import ClaudeSource
@@ -26,7 +27,7 @@ from .sources.codex import CodexSource
 from .sources.copilot import CopilotSource
 from .sources.gemini import GeminiSource
 from .sources.host import HostSource
-from .sources.ollama import OllamaSource
+from .sources.ollama import OllamaSource, ServerSpec
 from .sources.runners import RunnerHost, RunnersCfg, RunnersSource
 from .sshro import SshHost
 
@@ -81,12 +82,25 @@ def _gemini(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
 
 
 def _ollama(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
-    url = _need("ollama", "url", scfg)
-    log = scfg.options.get("admission_log")
+    listed = scfg.options.get("servers")
+    if listed is None:  # the single-server form: one server with the default name
+        url = _need("ollama", "url", scfg)
+        log = scfg.options.get("admission_log")
+        specs = [ServerSpec(DEFAULT_LLM_NAME, str(url), _path(log) if log else None)]
+    else:
+        specs = [
+            ServerSpec(
+                s["name"], s["url"], _path(s["admission_log"]) if "admission_log" in s else None
+            )
+            for s in listed
+        ]
     try:
-        return OllamaSource(str(url), _path(log) if log else None)
-    except ValueError:
-        raise ConfigError("sources.ollama: 'url' is not an acceptable http or https URL") from None
+        return OllamaSource(servers=specs)
+    except ValueError:  # the message never carries a URL, so no credential can leak
+        where = "servers" if listed is not None else "url"
+        raise ConfigError(
+            f"sources.ollama.{where}: a url is not an acceptable http or https URL"
+        ) from None
 
 
 def _client(scfg: SourceCfg, env: Mapping[str, str]) -> tuple[GhClient | None, str]:

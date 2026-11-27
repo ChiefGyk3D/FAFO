@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..model import Proc, Session, Snapshot
+from ..model import DEFAULT_LLM_NAME, MAX_LLM_SERVERS, LlmServer, Proc, Session, Snapshot
 from ..redact import sanitize_text
 from ..store import read_snapshot
 
@@ -183,6 +183,9 @@ class LlmView:
     inflight: list[InflightView] = field(default_factory=list)
     gpu: str = ""
     stale: bool = False
+    name: str = DEFAULT_LLM_NAME
+    label: bool = False  # show the server name: several servers, or one with a custom name
+    age: str = ""  # age of this server's last good poll (the snapshot's age when unknown)
 
 
 @dataclass
@@ -222,7 +225,9 @@ class Views:
     sessions: list[SessionNode] = field(default_factory=list)
     sessions_hidden: int = 0
     unattached: list[Group] = field(default_factory=list)
-    llm: LlmView | None = None
+    llm: LlmView | None = None  # the first server, kept for older readers
+    llms: list[LlmView] = field(default_factory=list)
+    llms_hidden: int = 0
     runners: list[RunnerView] = field(default_factory=list)
     runners_hidden: int = 0
     quota: list[QuotaLine] = field(default_factory=list)
@@ -338,6 +343,56 @@ def _quota_lines(quota: dict) -> list[QuotaLine]:
     return out
 
 
+def _llm_view(
+    srv: LlmServer,
+    names: dict[int, str],
+    now: float,
+    all_stale: bool,
+    stale_after_s: float,
+    snap_age: str,
+    label: bool,
+) -> LlmView:
+    gpu = srv.gpu if isinstance(srv.gpu, dict) else {}
+    # One server's rows go stale on their own: its last poll failed or is older than the limit.
+    aged = srv.last_ok > 0 and now - srv.last_ok > stale_after_s
+    stale = all_stale or not srv.reachable or aged
+    if all_stale or srv.last_ok <= 0:
+        age = UNKNOWN if (not all_stale and not srv.reachable) else snap_age
+    else:
+        age = age_text(now - srv.last_ok)
+    return LlmView(
+        models=[
+            ModelView(
+                name=_s(m.name, _CAP_NAME),
+                vram=size_text(m.vram),
+                context=f"{m.context // 1000}k" if m.context >= 1000 else str(m.context),
+                expires=(
+                    UNKNOWN
+                    if m.expires <= 0
+                    else ("expired" if m.expires <= now else age_text(m.expires - now))
+                ),
+            )
+            for m in srv.models[:MAX_MODELS]
+        ],
+        models_hidden=max(0, len(srv.models) - MAX_MODELS),
+        queue=srv.queue,
+        inflight=[
+            InflightView(
+                model=_s(i.model, _CAP_NAME),
+                session=_s(names.get(i.session_pid, UNKNOWN), _CAP_NAME)
+                if i.session_pid is not None
+                else UNKNOWN,
+            )
+            for i in srv.inflight[:MAX_MODELS]
+        ],
+        gpu=pct_text(gpu.get("util")) if _num(gpu.get("util")) is not None else "",
+        stale=stale,
+        name=_s(srv.name, _CAP_NAME),
+        label=label,
+        age=age,
+    )
+
+
 def build_views(
     snap: Snapshot | None,
     now: float,
@@ -420,38 +475,12 @@ def build_views(
         hidden = max(0, len(cloud) - MAX_GROUP_ROWS)
         unattached.append(Group(CLOUD_GROUP, sessions=cloud[:MAX_GROUP_ROWS], hidden=hidden))
 
-    llm = None
-    if snap.llm is not None:
-        names = {s.pid: n.name or n.project or f"pid {s.pid}" for s, n in nodes}
-        gpu = snap.llm.gpu if isinstance(snap.llm.gpu, dict) else {}
-        llm = LlmView(
-            models=[
-                ModelView(
-                    name=_s(m.name, _CAP_NAME),
-                    vram=size_text(m.vram),
-                    context=f"{m.context // 1000}k" if m.context >= 1000 else str(m.context),
-                    expires=(
-                        UNKNOWN
-                        if m.expires <= 0
-                        else ("expired" if m.expires <= now else age_text(m.expires - now))
-                    ),
-                )
-                for m in snap.llm.models[:MAX_MODELS]
-            ],
-            models_hidden=max(0, len(snap.llm.models) - MAX_MODELS),
-            queue=snap.llm.queue,
-            inflight=[
-                InflightView(
-                    model=_s(i.model, _CAP_NAME),
-                    session=_s(names.get(i.session_pid, UNKNOWN), _CAP_NAME)
-                    if i.session_pid is not None
-                    else UNKNOWN,
-                )
-                for i in snap.llm.inflight[:MAX_MODELS]
-            ],
-            gpu=pct_text(gpu.get("util")) if _num(gpu.get("util")) is not None else "",
-            stale=all_stale,
-        )
+    names = {s.pid: n.name or n.project or f"pid {s.pid}" for s, n in nodes}
+    shown_llms = snap.llms[:MAX_LLM_SERVERS]
+    label = len(shown_llms) > 1 or any(s.name != DEFAULT_LLM_NAME for s in shown_llms)
+    llms = [
+        _llm_view(s, names, now, all_stale, stale_after_s, snap_age, label) for s in shown_llms
+    ]
 
     runners = [
         RunnerView(
@@ -484,7 +513,9 @@ def build_views(
         sessions=shown,
         sessions_hidden=max(0, len(ordered) - MAX_SESSIONS),
         unattached=unattached,
-        llm=llm,
+        llm=llms[0] if llms else None,
+        llms=llms,
+        llms_hidden=max(0, len(snap.llms) - len(llms)),
         runners=runners,
         runners_hidden=max(0, len(snap.runners) - MAX_RUNNERS),
         quota=_quota_lines(snap.quota),

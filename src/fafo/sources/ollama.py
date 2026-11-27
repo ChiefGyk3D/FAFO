@@ -8,12 +8,14 @@ down while keeping the previous rows. An unreadable admission log is not an erro
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +23,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..model import Inflight, LlmServer, LoadedModel
+from ..collector import backoff_delay
+from ..model import DEFAULT_LLM_NAME, MAX_LLM_SERVERS, Inflight, LlmServer, LoadedModel
 from ..redact import sanitize_text
 from ..source import Ctx, SourceResult
 
@@ -242,28 +245,80 @@ def _admission(path: Path | None) -> tuple[int, list[Inflight]]:
     return queue, list(inflight.values())[:MAX_MODELS]
 
 
+@dataclass(frozen=True)
+class ServerSpec:
+    """One server to poll: a label, a base URL and an optional admission log."""
+
+    name: str
+    url: str
+    admission_log: Path | None = None
+
+
+@dataclass
+class _Server:
+    """A server and its own health: last good rows, failure count, next allowed poll."""
+
+    spec: ServerSpec
+    url: str  # validated, no trailing slash
+    last: LlmServer | None = None
+    failures: int = 0
+    next_try: float = 0.0
+    error: Exception | None = None
+    pending: Future | None = None
+
+
 class OllamaSource:
+    """Polls every configured server, each with its own backoff, in parallel.
+
+    One server failing never blanks the others: its last good rows are kept and flagged
+    unreachable (their last_ok stays old, so they age), and the rest stay fresh. Only when
+    every server fails in the same call does collect() raise, as a single server always did,
+    so the collector marks the source down and keeps the previous rows.
+    """
+
     name = "ollama"
 
     def __init__(
         self,
-        url: str,
+        url: str | None = None,
         admission_log: Path | None = None,
         http: HttpGet | None = None,
+        *,
+        servers: Sequence[ServerSpec] | None = None,
     ) -> None:
-        self._url = _check_url(url)
-        self._log = admission_log
+        if servers is None:
+            if url is None:
+                raise ValueError("ollama: a url or servers is needed")
+            servers = [ServerSpec(DEFAULT_LLM_NAME, url, admission_log)]
+        if not 1 <= len(servers) <= MAX_LLM_SERVERS:
+            raise ValueError(f"ollama: 1 to {MAX_LLM_SERVERS} servers")
+        names = [s.name.casefold() for s in servers]
+        if len(set(names)) != len(names):
+            raise ValueError("ollama: duplicate server name")
+        self._servers = [_Server(s, _check_url(s.url)) for s in servers]
         self._http: HttpGet = http or default_http_get
 
-    def _get(self, path: str) -> object:
-        resp = self._http(self._url + path, TIMEOUT_S, MAX_BODY)
+    @property
+    def servers(self) -> list[ServerSpec]:
+        return [s.spec for s in self._servers]
+
+    @property
+    def _url(self) -> str:
+        return self._servers[0].url
+
+    @property
+    def _log(self) -> Path | None:
+        return self._servers[0].spec.admission_log
+
+    def _get(self, base: str, path: str) -> object:
+        resp = self._http(base + path, TIMEOUT_S, MAX_BODY)
         if resp.status != 200:
             raise RuntimeError(f"ollama {path}: HTTP {resp.status}")
         return _parse_json(resp.body)
 
-    def collect(self, ctx: Ctx) -> SourceResult:
-        data = self._get("/api/ps")
-        self._get("/api/version")
+    def _poll_one(self, srv: _Server, now: float) -> LlmServer:
+        data = self._get(srv.url, "/api/ps")
+        self._get(srv.url, "/api/version")
         listed = data.get("models") if isinstance(data, dict) else None
         if not isinstance(listed, list):
             raise TypeError("ollama /api/ps: unexpected shape")
@@ -274,5 +329,57 @@ class OllamaSource:
                 models.append(m)
             if len(models) >= MAX_MODELS:
                 break
-        queue, inflight = _admission(self._log)
-        return SourceResult(llm=LlmServer(models=models, queue=queue, inflight=inflight, gpu={}))
+        queue, inflight = _admission(srv.spec.admission_log)
+        return LlmServer(
+            models=models, queue=queue, inflight=inflight, gpu={},
+            name=srv.spec.name, last_ok=now, reachable=True,
+        )
+
+    def _fail(self, srv: _Server, exc: Exception, now: float, interval: float) -> None:
+        srv.failures += 1
+        srv.error = exc
+        srv.next_try = now + backoff_delay(interval, srv.failures)
+
+    def collect(self, ctx: Ctx) -> SourceResult:
+        now = ctx.clock()
+        interval = ctx.cfg.interval_s
+        polled: list[_Server] = []
+        pool = ThreadPoolExecutor(max_workers=len(self._servers), thread_name_prefix="fafo-ollama")
+        try:
+            for srv in self._servers:
+                if srv.pending is not None and not srv.pending.done():
+                    self._fail(srv, TimeoutError("previous poll still running"), now, interval)
+                    continue
+                if now < srv.next_try:
+                    continue  # backing off: keep its last rows, poll the others
+                srv.pending = pool.submit(self._poll_one, srv, now)
+                polled.append(srv)
+            wait([s.pending for s in polled if s.pending], timeout=TIMEOUT_S + 1.0)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        for srv in polled:
+            fut = srv.pending
+            if fut is None or not fut.done():
+                self._fail(srv, TimeoutError("ollama poll timed out"), now, interval)
+                continue
+            srv.pending = None
+            try:
+                srv.last = fut.result()
+                srv.failures = 0
+                srv.error = None
+                srv.next_try = 0.0
+            except Exception as exc:  # noqa: BLE001 - any one server's failure is only its own
+                self._fail(srv, exc, now, interval)
+        errors = [s.error for s in self._servers if s.error is not None]
+        if len(errors) == len(self._servers):
+            raise errors[0]
+        rows = []
+        for srv in self._servers:
+            if srv.last is None:
+                rows.append(LlmServer([], 0, [], {}, name=srv.spec.name, reachable=False))
+            elif srv.error is not None:
+                rows.append(dataclasses.replace(srv.last, reachable=False))
+            else:
+                rows.append(srv.last)
+        down = any(s.error is not None for s in self._servers)
+        return SourceResult(llms=rows, llm=rows[0], status="stale" if down else None)

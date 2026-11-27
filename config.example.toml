@@ -50,6 +50,22 @@ enabled = true
 # admission_log = "/var/log/example-admission.log"
 #@ END example
 
+#@ BEGIN example-servers
+## Several Ollama servers (up to 8), each polled on its own: one down never hides the others,
+## its last rows stay and age. Use this form INSTEAD of url and admission_log above.
+## name: 1-32 characters from A-Z a-z 0-9 . _ - and unique. A single url (above) is one server
+## named "ollama". admission_log is optional per server.
+# [sources.ollama]
+# interval_s = 5
+# [[sources.ollama.servers]]
+# name = "gpu-box"
+# url = "http://gpu.example.invalid:11434"
+# admission_log = "/var/log/example-admission.log"
+# [[sources.ollama.servers]]
+# name = "laptop"
+# url = "http://laptop.example.invalid:11434"
+#@ END example-servers
+
 #@ BEGIN example
 ## CI runners. Off until this table exists. repos is required.
 # [sources.runners]

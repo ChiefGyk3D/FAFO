@@ -14,6 +14,8 @@ from typing import get_args
 
 from .jsonsafe import check_finite
 from .model import (
+    MAX_LLM_SERVERS,
+    OLD_SNAPSHOT_VERSION,
     SNAPSHOT_VERSION,
     Inflight,
     LlmServer,
@@ -57,7 +59,9 @@ def write_snapshot(
     """
     path = Path(path)
     ensure_private_dir(path.parent)
-    payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
+    doc = asdict(snap)
+    doc["llm"] = doc["llms"][0] if doc["llms"] else None  # first server, for older readers
+    payload = json.dumps(doc, separators=(",", ":")).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -170,36 +174,82 @@ def _session_list(data) -> list[Session]:
     return [_session(item) for item in data]
 
 
-def _llm(data) -> LlmServer | None:
+_LLM_NEW = {"name": "ollama", "last_ok": 0.0, "reachable": True}  # absent in version 1
+_MAX_LLM_NAME = 100
+
+
+def _name(v):
+    if type(v) is not str or not 0 < len(v) <= _MAX_LLM_NAME:
+        raise TypeError("bad server name")
+
+
+def _bool(v):
+    if type(v) is not bool:
+        raise TypeError("expected bool")
+
+
+def _llm(data, *, old: bool = False) -> LlmServer | None:
     if data is None:
         return None
-    _check(LlmServer, data, {"queue": _int, "gpu": _dict})
+    if old and type(data) is dict:
+        data = {**_LLM_NEW, **data}
+    _check(
+        LlmServer, data,
+        {"queue": _int, "gpu": _dict, "name": _name, "last_ok": _float, "reachable": _bool},
+    )
     return LlmServer(
         models=_list(LoadedModel, data["models"]),
         queue=data["queue"],
         inflight=_list(Inflight, data["inflight"]),
         gpu=data["gpu"],
+        name=data["name"],
+        last_ok=data["last_ok"],
+        reachable=data["reachable"],
     )
+
+
+def _llms(doc, old: bool) -> list[LlmServer]:
+    """Version 1 has only "llm" (one server, no name). Version 2 has "llms" and "llm", and the
+    two must agree: "llm" is a copy of the first server kept for older readers."""
+    first = _llm(doc["llm"], old=old)
+    if old:
+        return [] if first is None else [first]
+    raw = doc["llms"]
+    if type(raw) is not list or len(raw) > MAX_LLM_SERVERS:
+        raise TypeError("bad llms")
+    servers: list[LlmServer] = []
+    for item in raw:
+        s = _llm(item)
+        if s is None:
+            raise TypeError("null server in llms")
+        servers.append(s)
+    if first != (servers[0] if servers else None):
+        raise TypeError("llm does not match llms")
+    return servers
 
 
 def _snapshot(doc) -> Snapshot:
     if not isinstance(doc, dict):
         raise TypeError("expected object")
     version = doc.get("version")
-    if type(version) is not int or version != SNAPSHOT_VERSION:
+    if type(version) is not int or version not in (OLD_SNAPSHOT_VERSION, SNAPSHOT_VERSION):
         raise ValueError("unsupported version")
-    if set(doc) != {f.name for f in fields(Snapshot)}:
+    old = version == OLD_SNAPSHOT_VERSION
+    want = {f.name for f in fields(Snapshot)} | {"llm"}
+    if old:
+        want -= {"llms"}
+    if set(doc) != want:
         raise TypeError("field mismatch")
     _float(doc["taken"])
     _dict(doc["host"])
     _dict(doc["quota"])
     return Snapshot(
-        version=version,
+        version=SNAPSHOT_VERSION,
         taken=doc["taken"],
         host=doc["host"],
         sessions=_session_list(doc["sessions"]),
         procs=_list(Proc, doc["procs"]),
-        llm=_llm(doc["llm"]),
+        llms=_llms(doc, old),
         runners=_list(Runner, doc["runners"]),
         quota=doc["quota"],
         health=_list(SourceHealth, doc["health"]),

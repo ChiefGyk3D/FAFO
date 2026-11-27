@@ -76,6 +76,9 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
+dead server never hides the others; its last rows stay and show their age. See `config.example.toml`.
+
 ### Security notes
 
 - Read-only: FAFO never kills, dispatches, merges or writes to the things it observes. Its
