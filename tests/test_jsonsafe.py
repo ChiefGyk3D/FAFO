@@ -146,3 +146,36 @@ def test_read_snapshot_deep_values_low_limit(where, text, tmp_path: Path):
     path.write_text(raw.replace(old, f"{key}:{text(DEEP)}"), encoding="utf-8")
     with low_recursion_limit():
         assert read_snapshot(path) is None
+
+
+def test_plain_copy_handles_dataclasses_nonfinite_and_odd_scalars():
+    import dataclasses
+
+    from fafo.jsonsafe import plain_copy
+
+    @dataclasses.dataclass
+    class Row:
+        a: float
+        b: object
+
+    out, n = plain_copy({"rows": [Row(float("nan"), {1, 2}), Row(1.5, (1, float("inf")))]})
+    assert out == {"rows": [{"a": None, "b": None}, {"a": 1.5, "b": [1, None]}]}
+    assert n == 3
+
+
+def test_plain_copy_caps_depth_and_drops_nonstr_keys_without_raising():
+    from fafo.jsonsafe import MAX_DEPTH, plain_copy
+
+    deep: list = []
+    cur = deep
+    for _ in range(5000):
+        nxt: list = []
+        cur.append(nxt)
+        cur = nxt
+    out, n = plain_copy({"d": deep, 3: "x"})
+    assert n == 2 and set(out) == {"d"}
+    depth, node = 0, out["d"]
+    while node is not None:
+        depth += 1
+        node = node[0]
+    assert depth == MAX_DEPTH - 1
