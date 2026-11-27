@@ -8,6 +8,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
 DEFAULT_INTERVAL_S = 2.0
@@ -17,6 +18,23 @@ DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
 TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
 SECRET_WORDS = ("token", "password", "secret", "key")
+
+# Source-specific option keys, per source. Anything else is an unknown key.
+OPTION_KEYS: dict[str, frozenset[str]] = {
+    "claude": frozenset({"sessions_dir"}),
+    "ollama": frozenset({"url", "admission_log"}),
+    "runners": frozenset({"repos", "token_env", "hosts"}),
+    "copilot": frozenset({"repos", "session_paths", "token_env"}),
+}
+HOST_KEYS = frozenset({"name", "ssh", "key_path", "repos"})
+MAX_PATH_LEN = 4096
+MAX_URL_LEN = 2048
+MAX_LIST = 100
+MAX_HOSTS = 32
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+_LABEL = re.compile(r"[A-Za-z0-9._@-]{1,100}")  # host name and ssh alias (same as sshro)
+_PEM_MARK = "-----" + "BEGIN"
 
 
 class ConfigError(Exception):
@@ -28,6 +46,8 @@ class SourceCfg:
     enabled: bool = True
     interval_s: float = DEFAULT_INTERVAL_S
     timeout_s: float = DEFAULT_TIMEOUT_S
+    # Validated, source-specific options (see OPTION_KEYS). Never holds a secret value.
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -54,6 +74,29 @@ def _default_snapshot_path() -> Path:
     return base / "fafo" / "snapshot.json"
 
 
+def _env_name_ok(value: object) -> bool:
+    return isinstance(value, str) and _ENV_NAME.fullmatch(value) is not None
+
+
+def _path_ok(value: object) -> bool:
+    """A plain filesystem path string. It is never opened or read by the config."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_PATH_LEN
+        and _PEM_MARK not in value
+        and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+    )
+
+
+# The only secret-word keys that are allowed, by exact location. Each holds a NAME or a path,
+# never a secret, and its value is checked here, before anything else sees the file.
+_ALLOWED_SECRET_KEYS = {
+    "sources.runners.token_env": (_env_name_ok, "an environment variable NAME such as GITHUB_TOKEN"),
+    "sources.copilot.token_env": (_env_name_ok, "an environment variable NAME such as GITHUB_TOKEN"),
+    "sources.runners.hosts.key_path": (_path_ok, "a plain file path (never key contents)"),
+}
+
+
 def _check_secrets(data: dict, where: str = "", word_split: bool = False) -> None:
     for k, v in data.items():
         low = str(k).lower()
@@ -63,17 +106,26 @@ def _check_secrets(data: dict, where: str = "", word_split: bool = False) -> Non
         else:
             hit = any(w in low for w in SECRET_WORDS)
         if hit:
-            raise ConfigError(
-                f"secret-looking key '{where}{k}' in config file: secrets come from "
-                "environment variables, never the config file"
-            )
+            allowed = _ALLOWED_SECRET_KEYS.get(f"{where}{k}")
+            if allowed is None:
+                raise ConfigError(
+                    f"secret-looking key '{where}{k}' in config file: secrets come from "
+                    "environment variables, never the config file"
+                )
+            ok, what = allowed
+            if not ok(v):
+                raise ConfigError(f"'{where}{k}' must be {what}; the value is not accepted")
         if isinstance(v, dict):
             _check_secrets(v, f"{where}{k}.", word_split or k == "aliases")
+        elif isinstance(v, list):
+            for item in v:  # arrays of tables, such as [[sources.runners.hosts]]
+                if isinstance(item, dict):
+                    _check_secrets(item, f"{where}{k}.", word_split)
 
 
 def _positive_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{name} must be a positive number, got {str(value)[:40]!r}")
+        raise ConfigError(f"{name} must be a positive number")
     # Compare without converting: a huge TOML integer overflows float().
     if isinstance(value, float) and not math.isfinite(value):
         raise ConfigError(f"{name} must be a positive finite number")
@@ -82,6 +134,99 @@ def _positive_number(value: object, name: str) -> float:
     if value > MAX_SECONDS:
         raise ConfigError(f"{name} must be at most {MAX_SECONDS} seconds")
     return value
+
+
+def _bad(name: str, what: str) -> ConfigError:
+    return ConfigError(f"{name} {what}")  # never includes the offending value
+
+
+def _opt_text(value: object, name: str, max_len: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not 0 < len(value) <= max_len
+        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
+        raise _bad(name, f"must be a non-empty single-line string of at most {max_len} characters")
+    return value
+
+
+def _opt_path(value: object, name: str) -> str:
+    if not isinstance(value, str) or not _path_ok(value):
+        raise _bad(name, f"must be a plain path string of at most {MAX_PATH_LEN} characters")
+    return value
+
+
+def _opt_repos(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_LIST:
+        raise _bad(name, f"must be a list of at most {MAX_LIST} owner/name strings")
+    for item in value:
+        if not isinstance(item, str) or _REPO.fullmatch(item) is None:
+            raise _bad(name, "must contain only owner/name strings")
+    return list(value)
+
+
+def _opt_env(value: object, name: str) -> str:
+    if not isinstance(value, str) or not _env_name_ok(value):
+        raise _bad(name, "must be an environment variable NAME such as GITHUB_TOKEN")
+    return value
+
+
+def _opt_label(value: object, name: str) -> str:
+    if not isinstance(value, str) or _LABEL.fullmatch(value) is None or value.startswith("-"):
+        raise _bad(name, "must be 1-100 characters from A-Z a-z 0-9 . _ @ - and not start with -")
+    return value
+
+
+def _parse_hosts(value: object) -> list[dict[str, Any]]:
+    name = "sources.runners.hosts"
+    if not isinstance(value, list) or len(value) > MAX_HOSTS:
+        raise _bad(name, f"must be an array of at most {MAX_HOSTS} tables")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for h in value:
+        if not isinstance(h, dict):
+            raise _bad(name, "must be an array of tables")
+        for k in h:
+            if k not in HOST_KEYS:
+                raise ConfigError(f"unknown key '{name}.{k}'")
+        if "name" not in h:
+            raise _bad(name, "entries need a name")
+        item: dict[str, Any] = {"name": _opt_label(h["name"], f"{name}.name")}
+        if item["name"].casefold() in seen:
+            raise _bad(name, "has a duplicate host name")
+        seen.add(item["name"].casefold())
+        if "ssh" in h:
+            item["ssh"] = _opt_label(h["ssh"], f"{name}.ssh")
+        if "key_path" in h:
+            item["key_path"] = _opt_path(h["key_path"], f"{name}.key_path")
+        if "repos" in h:
+            item["repos"] = _opt_repos(h["repos"], f"{name}.repos")
+        out.append(item)
+    return out
+
+
+def _parse_options(source: str, body: dict) -> dict[str, Any]:
+    p = f"sources.{source}"
+    out: dict[str, Any] = {}
+    for k, v in body.items():
+        if k in SOURCE_KEYS:
+            continue
+        n = f"{p}.{k}"
+        if k in ("sessions_dir", "admission_log"):
+            out[k] = _opt_path(v, n)
+        elif k == "url":
+            out[k] = _opt_text(v, n, MAX_URL_LEN)
+        elif k == "repos":
+            out[k] = _opt_repos(v, n)
+        elif k == "token_env":
+            out[k] = _opt_env(v, n)
+        elif k == "hosts":
+            out[k] = _parse_hosts(v)
+        elif k == "session_paths":
+            if not isinstance(v, list) or len(v) > MAX_LIST:
+                raise _bad(n, f"must be a list of at most {MAX_LIST} strings")
+            out[k] = [_opt_text(x, n, 200) for x in v]
+    return out
 
 
 def _parse_sources(raw: object) -> dict[str, SourceCfg]:
@@ -93,8 +238,9 @@ def _parse_sources(raw: object) -> dict[str, SourceCfg]:
             raise ConfigError(f"unknown source '{name}'")
         if not isinstance(body, dict):
             raise ConfigError(f"sources.{name} must be a table")
+        allowed = SOURCE_KEYS | OPTION_KEYS.get(name, frozenset())
         for k in body:
-            if k not in SOURCE_KEYS:
+            if k not in allowed:
                 raise ConfigError(f"unknown key 'sources.{name}.{k}'")
         enabled = body.get("enabled", True)
         if not isinstance(enabled, bool):
@@ -107,6 +253,7 @@ def _parse_sources(raw: object) -> dict[str, SourceCfg]:
             timeout_s=_positive_number(
                 body.get("timeout_s", DEFAULT_TIMEOUT_S), f"sources.{name}.timeout_s"
             ),
+            options=_parse_options(name, body),
         )
     return out
 
