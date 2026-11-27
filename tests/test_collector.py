@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from fafo.collector import Collector, backoff_delay
-from fafo.config import Config, SourceCfg
-from fafo.model import Proc, Session, Stamped
+from fafo.config import Config, SourceCfg, load_config
+from fafo.model import Inflight, LlmServer, Proc, Runner, Session, Stamped
 from fafo.source import Ctx, SourceResult
-from fafo.store import read_snapshot
+from fafo.store import read_snapshot, write_snapshot
 
 
 def make_cfg(tmp_path: Path, **srcs: SourceCfg) -> Config:
@@ -227,6 +227,98 @@ def test_absent_source_is_hidden_not_error(tmp_path):
     h = health(col.snapshot(), "gone")
     assert h.status == "absent" and h.error == ""
     assert st.failures == 0 and st.delay == 0.1
+
+
+def alias_cfg(tmp_path: Path, **srcs: SourceCfg) -> Config:
+    f = tmp_path / "c.toml"
+    f.write_text('[aliases]\n"build-host.invalid" = "runner-a"\n')
+    base = load_config(f)
+    return Config(
+        sources=dict(srcs), aliases=base.aliases, snapshot_path=tmp_path / "s.json",
+        show_args=set(), _alias_re=base._alias_re, _alias_map=base._alias_map,
+    )
+
+
+def test_rows_are_scrubbed_and_aliased_at_the_collector(tmp_path):
+    h = "build-host.invalid"
+    tok = "ghp_" + "a1B2" * 8
+    esc = chr(0x1B)
+    s = session(1)
+    s.task = "do" + esc + "]0;pwn" + chr(7) + " it on " + h
+    s.branch = "br " + esc + "[31m" + h
+    s.worktree = h
+    s.project = Stamped("proj " + h, 5.0)
+
+    class Raw:
+        name = "raw"
+
+        def collect(self, ctx):
+            return SourceResult(
+                sessions=[s],
+                procs=[Proc(2, 1, None, "x", f"tool {esc}[2J --opt {tok} {h}", 0.0, 1, 1.0)],
+                runners=[Runner(h, "idle", h, "w", "j", "s" + chr(0), 1, 2, 0.0, 0.0, 0.0, 0.0)],
+                llm=LlmServer([], 0, [Inflight(h, None, 1.0)], {h: h}),
+                host={h: "up on " + h},
+                quota={"k" + esc + "[0m": h},
+            )
+
+    cfg = alias_cfg(tmp_path, raw=fast())
+    col = Collector(cfg, [Raw()], cfg.snapshot_path)
+    col._poll(col._states[0])
+    snap = col.snapshot()
+    blob = repr(snap)
+    assert h not in blob and tok not in blob
+    assert "\\x1b" not in blob and "\\x07" not in blob and "\\x00" not in blob
+    ss = snap.sessions[0]
+    assert ss.task == "do it on runner-a" and ss.branch == "br runner-a"
+    assert ss.worktree == "runner-a" and ss.project.value == "proj runner-a"
+    assert ss.project.as_of == 5.0
+    assert snap.runners[0].name == "runner-a" and snap.host == {"runner-a": "up on runner-a"}
+    assert snap.llm.inflight[0].model == "runner-a" and snap.quota == {"k": "runner-a"}
+    assert snap.procs[0].cmd.startswith("tool") and "<redacted>" in snap.procs[0].cmd
+
+
+def test_error_text_strips_unicode_separators_and_bidi(tmp_path):
+    msg = "a" + chr(0x2028) + "b" + chr(0x200B) + "c" + chr(0x202E) + "d\r\ne"
+
+    class Evil:
+        name = "evil"
+
+        def collect(self, ctx):
+            raise RuntimeError(msg)
+
+    cfg = make_cfg(tmp_path, evil=fast())
+    col = Collector(cfg, [Evil()], cfg.snapshot_path)
+    col._poll(col._states[0])
+    err = health(col.snapshot(), "evil").error
+    for bad in (chr(0x2028), chr(0x200B), chr(0x202E)):
+        assert bad not in err
+    assert "RuntimeError: abcd  e" in err
+
+
+def test_invalid_status_marks_down_keeps_rows_and_snapshot_readable(tmp_path):
+    class Bogus:
+        name = "bogus"
+        n = 0
+
+        def collect(self, ctx):
+            Bogus.n += 1
+            if Bogus.n == 1:
+                return SourceResult(sessions=[session(9)])
+            return SourceResult(sessions=[session(10)], status="bogus")
+
+    cfg = make_cfg(tmp_path, bogus=fast())
+    col = Collector(cfg, [Bogus()], cfg.snapshot_path)
+    st = col._states[0]
+    col._poll(st)
+    col._poll(st)
+    snap = col.snapshot()
+    h = health(snap, "bogus")
+    assert h.status == "down" and h.error == "invalid status from source"
+    assert [x.pid for x in snap.sessions] == [9]
+    assert st.failures == 1 and st.delay == 0.2
+    write_snapshot(cfg.snapshot_path, snap)
+    assert read_snapshot(cfg.snapshot_path) is not None
 
 
 def test_disabled_source_not_run(tmp_path):

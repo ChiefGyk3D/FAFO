@@ -240,3 +240,21 @@ def test_replace_is_atomic_reader_sees_old_snapshot(tmp_path: Path):
     assert seen == [old]
     after = read_snapshot(path)
     assert after is not None and after.taken == 2.0
+
+
+def test_write_creates_missing_parent_dirs_0700(tmp_path: Path):
+    target = tmp_path / "a" / "b" / "snap.json"
+    write_snapshot(target, make_snapshot())
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    for d in (tmp_path / "a", tmp_path / "a" / "b"):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    write_snapshot(target, make_snapshot(2000.0))
+    assert read_snapshot(target).taken == 2000.0
+
+
+def test_write_never_chmods_existing_directory(tmp_path: Path):
+    d = tmp_path / "shared"
+    d.mkdir()
+    d.chmod(0o755)
+    write_snapshot(d / "snap.json", make_snapshot())
+    assert stat.S_IMODE(d.stat().st_mode) == 0o755

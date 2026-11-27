@@ -7,40 +7,35 @@ Redaction is the sources' job, not this module's.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, get_args
 
 from .config import Config, SourceCfg
 from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
+from .redact import mask_credentials, sanitize_text
 from .source import Ctx, Source, SourceResult
 from .store import write_snapshot
 
 BACKOFF_CAP_S = 60.0
 ERROR_MAX_LEN = 200
+_FIELD_MAX_LEN = 1000
+_MAX_DEPTH = 8
 _POLL_SLICE_S = 0.05
 _MIN_TICK_S = 0.05
 
 _log = logging.getLogger("fafo.collector")
 
 
-def _clean_error(text: str, max_len: int = ERROR_MAX_LEN) -> str:
-    """Strip control characters and cap the length.
-
-    TODO(FAFO#4): switch to fafo.redact.sanitize_text once the redactor is merged.
-    """
-    out = []
-    for ch in str(text):
-        if ch in "\n\r\t":
-            out.append(" ")
-        elif ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F:
-            continue
-        else:
-            out.append(ch)
-    return "".join(out)[:max_len]
+def _clean_error(text: str) -> str:
+    """Make exception text safe for the snapshot: line breaks to spaces, then sanitize."""
+    flat = str(text).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    return sanitize_text(flat, ERROR_MAX_LEN)
 
 
 def backoff_delay(interval_s: float, failures: int) -> float:
@@ -49,6 +44,31 @@ def backoff_delay(interval_s: float, failures: int) -> float:
         return interval_s
     grown = interval_s * (2 ** min(failures, 30))
     return max(interval_s, min(BACKOFF_CAP_S, grown))
+
+
+def _scrub(obj: Any, cfg: Config, depth: int = 0) -> Any:
+    """Sanitize every string (and dict key) in a row and apply host aliases. Fail closed."""
+    if depth > _MAX_DEPTH:
+        raise ValueError("row nesting too deep")
+    if isinstance(obj, str):
+        return cfg.alias(sanitize_text(obj, _FIELD_MAX_LEN))
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return dataclasses.replace(
+            obj,
+            **{f.name: _scrub(getattr(obj, f.name), cfg, depth + 1) for f in dataclasses.fields(obj)},
+        )
+    if isinstance(obj, dict):
+        return {_scrub(str(k), cfg, depth + 1): _scrub(v, cfg, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub(v, cfg, depth + 1) for v in obj]
+    return obj
+
+
+def _scrub_result(res: SourceResult, cfg: Config) -> SourceResult:
+    out = _scrub(res, cfg)
+    for p in out.procs:
+        p.cmd = mask_credentials(p.cmd)
+    return out
 
 
 @dataclass
@@ -97,7 +117,7 @@ class Collector:
     def _call(self, st: _State) -> tuple[SourceResult | None, str, bool]:
         """Run collect() in a daemon worker. Returns (result, error, timed_out)."""
         if st.worker is not None and st.worker.is_alive():
-            return None, "previous call still hung", True
+            return None, "timeout: previous call still hung", True
         box: dict = {}
         done = threading.Event()
 
@@ -126,7 +146,12 @@ class Collector:
         res = box["r"]
         if not isinstance(res, SourceResult):
             return None, f"bad result type {type(res).__name__}", False
-        return res, "", False
+        if res.status is not None and res.status not in get_args(Status):
+            return None, "invalid status from source", False
+        try:
+            return _scrub_result(res, self._cfg), "", False
+        except Exception as exc:  # noqa: BLE001 - malformed rows count as a failed call
+            return None, f"unusable rows: {type(exc).__name__}", False
 
     def _poll(self, st: _State) -> None:
         res, err, timed_out = self._call(st)

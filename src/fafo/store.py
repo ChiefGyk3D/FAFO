@@ -26,6 +26,21 @@ from .model import (
 )
 
 
+def _ensure_dir(directory: Path) -> None:
+    """Create missing directories as 0700. An existing directory is never chmodded."""
+    missing: list[Path] = []
+    cur = directory
+    while not cur.exists() and cur != cur.parent:
+        missing.append(cur)
+        cur = cur.parent
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            continue  # someone else created it: not ours to chmod
+        os.chmod(d, 0o700)
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -34,6 +49,7 @@ def write_snapshot(
     _before_replace is a test seam called after the temp file is complete and before the rename.
     """
     path = Path(path)
+    _ensure_dir(path.parent)
     payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
