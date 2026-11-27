@@ -125,3 +125,29 @@ def test_fast_json_child_still_works(tmp_path):
     assert not hung and a.health == "ok"
     assert out["s1"].issue == "o/r#1"
     assert MAX_OUTPUT > 1000
+
+
+def test_normal_exit_kills_group_once_before_reap(group_kill_spy):
+    from fafo.adapters.safo import _default_runner
+
+    raw = _default_runner(child(f"print({GOOD!r})"), 3.0, {"PATH": os.environ["PATH"]})
+    assert GOOD.encode() in raw
+    kills = group_kill_spy.kills()
+    assert len(kills) == 1
+    assert group_kill_spy.events[0] == kills[0]  # no wait before the kill
+    assert group_kill_spy.reaped_when_killed == []
+
+
+def test_normal_exit_leaves_no_grandchild(tmp_path):
+    pf = tmp_path / "pids"
+    code = (
+        "import subprocess,sys\n"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"open({str(pf)!r},'w').write(str(g.pid))\n"
+        f"print({GOOD!r})\n"
+    )
+    a = SafoAdapter(child(code), timeout_s=3.0)
+    out, _elapsed, hung, _ = run_guarded(a, tmp_path / "none", 4.0)
+    assert not hung and a.health == "ok" and out["s1"].issue == "o/r#1"
+    assert wait_gone([int(pf.read_text())])
