@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import select
+import signal
 import subprocess
 import threading
 import time
@@ -45,6 +46,9 @@ class SubprocessGit:
             "LANG": "C",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
         }
         argv = [self._git_bin, "-C", cwd, *args]
         try:
@@ -55,14 +59,17 @@ class SubprocessGit:
                 stderr=subprocess.DEVNULL,
                 env=env,
                 shell=False,
+                start_new_session=True,
             )
         except (OSError, ValueError):
             return None
         try:
             return _read_capped(proc, timeout)
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            try:  # before reaping, so the group id cannot have been reused
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
             try:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
@@ -177,7 +184,7 @@ def _resolve(directory: str, git: GitRunner) -> tuple[str, str] | None:
     if not top or "\n" in top or not os.path.isabs(top):
         return None
     name = None
-    remote = git.run(["config", "--get", "remote.origin.url"], directory, GIT_TIMEOUT_S)
+    remote = git.run(["config", "--local", "--get", "remote.origin.url"], directory, GIT_TIMEOUT_S)
     if remote:
         name = _name_from_remote(remote)
     if name is None:
@@ -185,6 +192,13 @@ def _resolve(directory: str, git: GitRunner) -> tuple[str, str] | None:
     if not name:
         return None
     return top, name
+
+
+def _adapter_name(value: str) -> str | None:
+    """Safe project name from adapter data, or None if it must be ignored."""
+    if re.search(r"[/:@\s]", value):
+        return _name_from_remote(value)
+    return value if _SAFE_NAME.fullmatch(value) else None
 
 
 def attribute(
@@ -197,7 +211,7 @@ def attribute(
 ) -> tuple[str, str]:
     """Return (project, rule) for a session."""
     if adapter_project:
-        cleaned = _clean(adapter_project)
+        cleaned = _adapter_name(adapter_project)
         if cleaned:
             return cleaned, "adapter"
     runner: GitRunner = git if git is not None else _DEFAULT_GIT

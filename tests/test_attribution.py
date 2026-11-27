@@ -215,9 +215,8 @@ def test_control_characters_in_remote_fall_back(tmp_path: Path):
     assert attribution._name_from_remote("https://h/org/re" + chr(10) + "po.git") is None
 
 
-def test_adapter_name_is_sanitized():
-    project, rule = attribute(None, [], "pr" + chr(27) + "oj")
-    assert (project, rule) == ("proj", "adapter")
+def test_adapter_name_with_control_chars_is_rejected():
+    assert attribute(None, [], "pr" + chr(27) + "oj") == ("unknown", "cwd-name")
 
 
 def test_oversized_output_is_handled(tmp_path: Path):
@@ -238,3 +237,82 @@ def test_oversized_fake_output_is_not_trusted(tmp_path: Path):
     project, _rule = attribute(str(d), [], git=git)
     assert len(project) <= 100
     assert "b" * 200 not in project
+
+
+def test_adapter_credentialed_url_reduced_to_name(caplog):
+    url = f"https://user:{TOKEN}@host.example/org/repo.git"
+    result = attribute(None, [], url)
+    assert result == ("repo", "adapter")
+    assert TOKEN not in repr(result)
+
+
+def test_adapter_scp_style_reduced_to_name():
+    assert attribute(None, [], "git@host:org/repo.git") == ("repo", "adapter")
+
+
+def test_adapter_with_spaces_or_controls_rejected_and_falls_through(tmp_path: Path):
+    r = make_repo(tmp_path / "gitname")
+    for bad in ("my project", "pr" + chr(27) + "oj", "a" + chr(10) + "b", "x" * 101):
+        assert attribute(str(r), [], bad) == ("gitname", "cwd-git")
+    assert attribute(None, [], "my project") == ("unknown", "cwd-name")
+
+
+def test_adapter_plain_name_accepted():
+    assert attribute(None, [], "my-project") == ("my-project", "adapter")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def test_timeout_kills_whole_process_group(tmp_path: Path):
+    d = tmp_path / "w"
+    d.mkdir()
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "grouplaunch"
+    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nsleep 30\n")
+    script.chmod(0o700)
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 0.5) is None
+    child = int(pidfile.read_text())
+    for _ in range(50):
+        if not _alive(child):
+            break
+        time.sleep(0.05)
+    assert not _alive(child)
+
+
+def test_oversize_kills_whole_process_group(tmp_path: Path):
+    d = tmp_path / "w"
+    d.mkdir()
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "bigblocker"
+    script.write_text(
+        f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\n"
+        "head -c 5000 /dev/zero | tr '\\0' a\nsleep 30\n"
+    )
+    script.chmod(0o700)
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 5) is None
+    child = int(pidfile.read_text())
+    for _ in range(50):
+        if not _alive(child):
+            break
+        time.sleep(0.05)
+    assert not _alive(child)
+
+
+def test_global_git_config_cannot_supply_remote(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[remote \"origin\"]\n\turl = https://h/org/decoy.git\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    r = make_repo(tmp_path / "toplevelname")
+    assert attribute(str(r), []) == ("toplevelname", "cwd-git")
