@@ -631,14 +631,17 @@ def test_large_refresh_ui_thread_time_is_bounded(snap_path):
                 app.handle_result(ReadResult(views=views, changed=changed, at=time.time(), error=""))
                 return time.thread_time() - t0, time.monotonic() - w0
 
-            changed_cost, changed_wall = min(cpu_cost(True) for _ in range(3))
+            samples = [cpu_cost(True) for _ in range(3)]
+            changed_cost = min(c for c, _ in samples)  # best CPU sample: noise only adds CPU
+            changed_wall = max(w for _, w in samples)  # worst wall sample: a block in any run counts
             await pilot.pause(0.05)
             unchanged_cost, _ = min(cpu_cost(False) for _ in range(3))
             print(f"large refresh cpu: changed {changed_cost * 1000:.1f} ms, "
                   f"unchanged {unchanged_cost * 1000:.1f} ms")
             assert changed_cost < 1.0  # about 0.1 s of CPU unloaded: generous, but bounded
             assert unchanged_cost < 0.1
-            # CPU time cannot see a blocked (sleeping) UI thread: a very loose wall bound does
+            # CPU time cannot see a blocked (sleeping) UI thread, but a very loose wall bound
+            # can still detect one: it is far above any scheduling delay seen under load.
             assert changed_wall < 10.0
             assert unchanged_cost < changed_cost / 4  # the no-change path skips the rebuild
             assert "row 1 of " in app.dump()
