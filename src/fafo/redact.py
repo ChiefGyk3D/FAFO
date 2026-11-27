@@ -22,7 +22,7 @@ MAX_REDACTED_LEN = 1000
 
 MAX_TOKEN_LEN = 256
 
-_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}=")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}=")
 _SAFE_EXE = re.compile(r"^[A-Za-z0-9_.+-]{1,256}$")
 
 # Secret-like names. Long names match as substrings; short ones only as whole words
@@ -35,13 +35,13 @@ _SECRET_NAME = re.compile(_SECRET_SUBSTR)
 _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 _CREDENTIAL_VALUE = re.compile(
     rf"""(?ix)
-    [a-z][a-z0-9+.-]{{0,31}}://[^/\s@]{{0,256}}@               # url with userinfo
-    | \bbearer\s{{1,16}}\S                                    # bearer header value
-    | \bbasic\s{{1,16}}[A-Za-z0-9+/=]{{6,}}                    # basic header value
+    [a-z][a-z0-9+.-]{{0,255}}://[^/\s@]{{0,256}}@               # url with userinfo
+    | \bbearer\s{{1,256}}\S                                    # bearer header value
+    | \bbasic\s{{1,256}}[A-Za-z0-9+/=]{{6,300}}                    # basic header value
     | \b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|akia|aiza|eyj)[A-Za-z0-9_-]   # known prefixes
-    | (?:(?:{_SECRET_SUBSTR})[\w-]{{0,64}}
+    | (?:(?:{_SECRET_SUBSTR})[\w-]{{0,256}}
        |(?<![A-Za-z0-9])(?:{"|".join(sorted(_SECRET_WORDS))}))
-      \s{{0,8}}[=:]\s{{0,8}}\S                                 # key=value
+      \s{{0,256}}[=:]\s{{0,256}}\S                                 # key=value
     """
 )
 _LONG_RUN = re.compile(r"[A-Za-z0-9+/=_-]{40,300}")

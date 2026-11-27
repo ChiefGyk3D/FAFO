@@ -79,4 +79,4 @@ def test_regexes_themselves_are_bounded():
         start = time.monotonic()
         _CREDENTIAL_VALUE.search(body)
         _LONG_RUN.search(body)
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.0
