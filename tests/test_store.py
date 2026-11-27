@@ -1,6 +1,7 @@
 import json
 import stat
 import threading
+from dataclasses import fields
 from pathlib import Path
 
 from fafo.model import (
@@ -329,6 +330,27 @@ def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
     assert read_snapshot(path) is None
 
 
+def test_project_source_roundtrip_and_old_snapshot_defaults_live(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"
+    path2, doc = _doc(tmp_path)
+    doc["sessions"][0].pop("project_source", None)
+    path2.write_text(json.dumps(doc))
+    got = read_snapshot(path2)
+    assert got is not None and got.sessions[0].project_source == "live"
+
+
+def test_bad_project_source_rejected(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    doc["sessions"][0]["project_source"] = "bogus"
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
+
+
 def _strict_load(path: Path):
     def refuse(name):
         raise AssertionError(f"non-standard JSON constant {name}")
@@ -555,3 +577,16 @@ def test_sanitize_warning_wording_and_no_values(tmp_path: Path, caplog):
         write_snapshot(tmp_path / "snap.json", snap)
     msgs = [r.getMessage() for r in caplog.records if r.name == "fafo.store"]
     assert msgs == ["snapshot: sanitized 3 values (nulled, dropped or truncated)"]
+
+
+def test_default_live_snapshot_has_the_pre_project_source_key_set(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    old = {f.name for f in fields(Session)} - {"project_source"}
+    for s in doc["sessions"]:
+        assert set(s) == old
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    assert json.loads(path.read_text())["sessions"][0]["project_source"] == "last"
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"

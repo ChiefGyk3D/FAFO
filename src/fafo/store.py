@@ -1,4 +1,9 @@
-"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix."""
+"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix.
+
+Strict schema: a session's `project_source` key is written only when it is not "live". The reader
+accepts both forms, but an older reader refuses a snapshot that contains a last-known or folder
+project (it rejects unknown keys) by design; SNAPSHOT_VERSION is deliberately not bumped for this.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ from .model import (
     LlmServer,
     LoadedModel,
     Proc,
+    ProjectSource,
     Runner,
     Session,
     Snapshot,
@@ -51,6 +57,17 @@ def ensure_private_dir(directory: Path) -> None:
     _ensure_dir(Path(directory))
 
 
+def _omit_default_source(plain) -> None:
+    """Leave out the default project_source ("live") so a snapshot with no last-known project keeps
+    the exact key set older readers accept. A snapshot that does carry one (idle session showing its
+    last repo, or a folder name) is refused by older readers by design: the schema is strict."""
+    sessions = plain.get("sessions") if isinstance(plain, dict) else None
+    if isinstance(sessions, list):
+        for s in sessions:
+            if isinstance(s, dict) and s.get("project_source") == "live":
+                del s["project_source"]
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -65,6 +82,7 @@ def write_snapshot(
     plain, replaced = plain_copy(snap)
     if replaced:
         _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
+    _omit_default_source(plain)
     payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -121,6 +139,11 @@ def _status(v):
         raise TypeError("bad status")
 
 
+def _project_source(v):
+    if type(v) is not str or v not in get_args(ProjectSource):
+        raise TypeError("bad project_source")
+
+
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
 _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
@@ -140,9 +163,9 @@ _SPEC = {
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
     "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
-    "rss": _int, "name": _str, "address": _str,
+    "rss": _int, "name": _str, "address": _str, "project_source": _project_source,
 }
-_SESSION_OPTIONAL = {"name": "", "address": ""}  # absent in older snapshots
+_SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live"}  # absent in older snapshots
 
 
 def _check(cls, data, spec):

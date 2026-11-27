@@ -10,6 +10,7 @@ T = TypeVar("T")
 SNAPSHOT_VERSION = 1
 
 Status = Literal["ok", "stale", "down", "absent"]
+ProjectSource = Literal["live", "last", "folder"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class Session:
     rss: int
     name: str = ""
     address: str = ""  # full session id, for manual cross-session messaging
+    project_source: ProjectSource = "live"  # live repo, last-known repo (idle), or folder name
 
 
 @dataclass
