@@ -58,33 +58,105 @@ def test_overlong_leading_and_unshown_tokens_safe():
     assert redact_argv(["A=" + big, "cmd"], set()) == "<env> cmd"
 
 
+BASE_N = 125_000
+SCALE = 8
+FLOOR_S = 0.005
+MAX_RATIO = 20  # linear is 8, quadratic is 64
+CEILING_S = 5.0
+
+
+def _best_of_3(fn):
+    best = None
+    for _ in range(3):
+        start = time.perf_counter()
+        fn()
+        took = time.perf_counter() - start
+        best = took if best is None else min(best, took)
+    return best
+
+
+def _assert_scales_linearly(fn_for_size, n):
+    """Scale-free check: t(8n)/t(n) stays far below the quadratic ratio of 64."""
+    small = max(_best_of_3(fn_for_size(n)), FLOOR_S)
+    big = _best_of_3(fn_for_size(n * SCALE))
+    assert big < CEILING_S, f"{big:.3f}s at 8n exceeds the ceiling"
+    assert big / small < MAX_RATIO, f"ratio {big / small:.1f} (small={small:.4f}s big={big:.4f}s)"
+
+
 ADVERSARIAL = [
-    "a" * 1_000_000,
-    "https://" + "a" * 1_000_000,
-    "a" * 1_000_000 + "://",
-    "key=" * 250_000,
-    "bearer" + " " * 1_000_000,
-    "token" + "-" * 1_000_000 + "x",
-    "/" + "a" * 39 + "/" * 1_000_000,
-    (ESC + "]") * 500_000,
+    lambda n: "a" * n,
+    lambda n: "https://" + "a" * n,
+    lambda n: "a" * n + "://",
+    lambda n: "key=" * (n // 4),
+    lambda n: "bearer" + " " * n,
+    lambda n: "token" + "-" * n + "x",
+    lambda n: "/" + "a" * 39 + "/" * n,
+    lambda n: (ESC + "]") * (n // 2),
 ]
 
 
-@pytest.mark.parametrize("tok", ADVERSARIAL, ids=[str(i) for i in range(len(ADVERSARIAL))])
-def test_adversarial_1mb_token_is_fast(tok):
-    start = time.monotonic()
-    redact_argv(["tool", "--model", tok, tok], {"--model"}, value_flags=VF)
-    redact_argv([tok, "--model", tok], {"--model"}, value_flags=VF)
-    redact_argv(["tool", "--model=" + tok], {"--model"}, value_flags=VF)
-    assert time.monotonic() - start < 0.5
+def _run_redact(tok):
+    def go():
+        redact_argv(["tool", "--model", tok, tok], {"--model"}, value_flags=VF)
+        redact_argv([tok, "--model", tok], {"--model"}, value_flags=VF)
+        redact_argv(["tool", "--model=" + tok], {"--model"}, value_flags=VF)
+
+    return go
+
+
+@pytest.mark.parametrize("shape", ADVERSARIAL, ids=[str(i) for i in range(len(ADVERSARIAL))])
+def test_adversarial_token_scales_linearly(shape):
+    _assert_scales_linearly(lambda n: _run_redact(shape(n)), BASE_N)
+
+
+@pytest.mark.parametrize("shape", ADVERSARIAL, ids=[str(i) for i in range(len(ADVERSARIAL))])
+def test_adversarial_1mb_token_is_capped(shape):
+    tok = shape(1_000_000)
+    assert len(tok) >= 900_000  # something real was built
+    for argv in (["tool", "--model", tok], [tok, "--model", "x"], ["tool", tok]):
+        out = redact_argv(argv, {"--model"}, value_flags=VF)
+        assert tok not in out
+        assert len(out) < 300
+    shown = redact_argv(["tool", "--model", tok], {"--model"}, value_flags=VF)
+    assert shown.endswith("<redacted>")
+    assert redact_argv(["tool", tok], {"--model"}, value_flags=VF).endswith("<arg>")
+
+
+def test_scale_check_bites_on_quadratic_work():
+    """Negative case: the guard itself must fail on quadratic behavior."""
+
+    def quadratic(n):
+        def go():
+            total = 0
+            for i in range(n):
+                for j in range(n):
+                    total ^= i + j
+            return total
+
+        return go
+
+    with pytest.raises(AssertionError):
+        _assert_scales_linearly(quadratic, 200)
 
 
 def test_regexes_themselves_are_bounded():
     """Defense in depth: even if the length cap were bypassed, no regex is quadratic."""
     from fafo.redact import _CREDENTIAL_VALUE, _LONG_RUN
 
-    for body in ("a" * 20_000, "https://" + "a" * 20_000, "key" + " " * 20_000):
-        start = time.monotonic()
-        _CREDENTIAL_VALUE.search(body)
-        _LONG_RUN.search(body)
-        assert time.monotonic() - start < 1.0
+    shapes = (
+        lambda n: "a" * n,
+        lambda n: "https://" + "a" * n,
+        lambda n: "key" + " " * n,
+    )
+    for shape in shapes:
+
+        def for_size(n, shape=shape):
+            body = shape(n)
+
+            def go():
+                _CREDENTIAL_VALUE.search(body)
+                _LONG_RUN.search(body)
+
+            return go
+
+        _assert_scales_linearly(for_size, 2_500)
