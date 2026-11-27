@@ -327,3 +327,91 @@ def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
     nest = "[" * 5000 + "1.5" + "]" * 5000
     path = _tampered(tmp_path, '"load":4.1', f'"load":{nest}')
     assert read_snapshot(path) is None
+
+
+def _strict_load(path: Path):
+    def refuse(name):
+        raise AssertionError(f"non-standard JSON constant {name}")
+
+    return json.loads(path.read_bytes(), parse_constant=refuse)
+
+
+def test_write_nonfinite_in_nested_dicts_roundtrips_as_null(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {"a": float("nan"), "b": [float("inf"), {"c": float("-inf")}], "ok": 1.5}
+    snap.quota = {"claude": {"5h": float("nan")}}
+    snap.llm.gpu = {"util": float("inf")}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    doc = _strict_load(path)
+    assert doc["host"] == {"a": None, "b": [None, {"c": None}], "ok": 1.5}
+    back = read_snapshot(path)
+    assert back is not None
+    assert back.host == doc["host"]
+    assert back.quota == {"claude": {"5h": None}}
+    assert back.llm.gpu == {"util": None}
+
+
+def test_write_nonfinite_in_stamped_field_writes_strict_json(tmp_path: Path):
+    snap = make_snapshot()
+    snap.sessions[0].project = Stamped("demo", float("nan"))
+    snap.procs[0].cpu = float("inf")
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # must not raise
+    doc = _strict_load(path)
+    assert doc["sessions"][0]["project"]["as_of"] is None
+    assert doc["procs"][0]["cpu"] is None
+    # a typed field that became null is refused by the reader, cleanly
+    assert read_snapshot(path) is None
+
+
+def test_write_deeply_nested_value_does_not_raise_and_reads_back(tmp_path: Path):
+    deep: list = []
+    cur = deep
+    for _ in range(5000):
+        nxt: list = []
+        cur.append(nxt)
+        cur = nxt
+    snap = make_snapshot()
+    snap.host = {"deep": deep}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    back = read_snapshot(path)
+    assert back is not None
+    depth = 0
+    node = back.host["deep"]
+    while node is not None:
+        depth += 1
+        node = node[0]
+    assert 1 <= depth <= 32
+
+
+def test_write_huge_structure_is_capped(tmp_path: Path):
+    snap = make_snapshot()
+    snap.quota = {"big": list(range(200_000))}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    doc = _strict_load(path)
+    big = doc["quota"]["big"]
+    assert 0 < len(big) < 100_000
+    assert big[0] == 0 and None not in big
+    assert read_snapshot(path) is not None
+
+
+def test_write_logs_count_only_no_values(tmp_path: Path, caplog):
+    snap = make_snapshot()
+    snap.host = {"secret-key": float("nan"), "x": float("inf")}
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(tmp_path / "snap.json", snap)
+    text = caplog.text
+    assert "2" in text
+    assert "secret-key" not in text and "nan" not in text.lower().replace("snapshot", "")
+
+
+def test_write_nonfinite_keeps_mode_and_leaves_no_temp_files(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {"a": float("nan")}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+    assert [p.name for p in tmp_path.iterdir()] == ["snap.json"]
