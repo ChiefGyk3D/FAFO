@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_example_2","name":"Edit","input":{"file_path":"/home/example/private-dir/src/widget.py","old_string":"a","new_string":"b"}}]}}

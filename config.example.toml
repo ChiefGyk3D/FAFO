@@ -42,6 +42,13 @@ interval_s = 2
 timeout_s = 5
 # Directory holding the Claude Code session registry. Default: ~/.claude/sessions
 # sessions_dir = "~/.claude/sessions"
+# What the TASK column shows for a session: "off" (state only), "activity" (the default: the
+# last tool and a minimal object, such as "Bash: make" or "Edit: widget.py", plus "(5m ago)"
+# once it is over two minutes old) or "prompt" (the
+# first 60 characters of your last message). "prompt" masking is best effort (token shapes and
+# keyword phrases), so it may still show other sensitive prose on screen and in screenshots;
+# use it only if you are comfortable with that.
+# task_labels = "activity"
 
 [sources.codex]
 enabled = true

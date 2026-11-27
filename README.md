@@ -76,12 +76,23 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+### Task labels
+
+The TASK column of a Claude session shows what it is doing. By default (`task_labels =
+"activity"` under `[sources.claude]`) that is the last tool plus a minimal object, such as
+`Bash: make` (first word of the command only) or `Edit: widget.py` (file name only), read from
+the last 64 KB of the session transcript and capped at 80 characters. When that tool call is more than two minutes old the label gets an
+age suffix such as `(5m ago)`. `"off"` shows the state
+only. `"prompt"` shows the first 60 characters of your last message. Masking is best effort
+(token shapes and keyword phrases such as `password: ...`), so it may still display other
+sensitive prose, on screen and in screenshots. Use it only if you are comfortable with that.
+
 ### Security notes
 
 - Read-only: FAFO never kills, dispatches, merges or writes to the things it observes. Its
   only write is the snapshot file (mode 0600; directories it creates are mode 0700).
 - Redaction happens in the collector before anything is written: command arguments are
-  scrubbed against an allowlist, environments and transcript text are never collected, and
+  scrubbed against an allowlist, environments are never collected, and transcript text is read only for the short task label described above, and
   configured host names are replaced by aliases.
 - Command lines are shown allowlist-first (`args_mode = "allowlist"`, the default). The opt-in
   `args_mode = "safe"` also shows short bare words, flag names and the base name of a script,

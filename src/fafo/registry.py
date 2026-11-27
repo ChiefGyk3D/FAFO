@@ -70,7 +70,10 @@ def _host(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
 def _claude(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
     d = scfg.options.get("sessions_dir")
     return ClaudeSource(
-        _path(d) if d else None, show_args=set(cfg.show_args), args_mode=cfg.args_mode
+        _path(d) if d else None,
+        show_args=set(cfg.show_args),
+        args_mode=cfg.args_mode,
+        task_labels=scfg.options.get("task_labels", "activity"),
     )
 
 
