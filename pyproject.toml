@@ -34,6 +34,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "perf: load and overhead measurement; --perf-full or FAFO_PERF_FULL=1 selects the long variant",
+]
 
 [tool.ruff]
 line-length = 100
