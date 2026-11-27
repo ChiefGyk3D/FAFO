@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import wait_gone
+from conftest import Ran, deadline_bound, run_when_ready, wait_gone
 
 from fafo.sshro import OPS, SshError, SshHost, build_argv, default_runner, ssh_ro
 
@@ -123,39 +123,55 @@ def test_nonzero_exit_and_runner_errors_become_ssherror():
         ssh_ro(HOST, "df", runner=Fake(out=b"x" * (64 * 1024 + 1)))
 
 
-def _script(tmp_path: Path, body: str) -> Path:
-    p = tmp_path / "fake-ssh.sh"
+def _script(tmp_path: Path, body: str, name: str = "fake-ssh.sh") -> Path:
+    p = tmp_path / name
     p.write_text("#!/bin/sh\n" + body)
     p.chmod(stat.S_IRWXU)
     return p
 
 
 def test_hung_child_cut_by_deadline_and_group_killed(tmp_path):
-    pidfile = tmp_path / "child.pid"
-    script = _script(tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n")
+    def scenario(deadline):
+        pidfile = tmp_path / f"child-{deadline}.pid"
+        script = _script(
+            tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n", f"fake-ssh-{deadline}.sh"
+        )
 
-    def runner(argv, timeout_s, env):
-        return default_runner([str(script)], timeout_s, env)
+        def runner(argv, timeout_s, env):
+            return default_runner([str(script)], timeout_s, env)
 
-    result: dict = {}
+        result: dict = {}
 
-    def target():
-        t0 = time.monotonic()
-        try:
-            ssh_ro(HOST, "loadavg", timeout_s=0.7, runner=runner)
-        except SshError as exc:
-            result["err"] = exc
-        result["elapsed"] = time.monotonic() - t0
+        def target():
+            t0 = time.monotonic()
+            try:
+                ssh_ro(HOST, "loadavg", timeout_s=deadline, runner=runner)
+            except SshError as exc:
+                result["err"] = exc
+            result["elapsed"] = time.monotonic() - t0
 
-    th = threading.Thread(target=target, daemon=True)
-    th.start()
-    th.join(8)
-    assert not th.is_alive(), "ssh deadline did not fire"
-    assert "err" in result and result["elapsed"] < 5
-    pid = int(pidfile.read_text())
-    if not wait_gone([pid]):
-        os.kill(pid, 9)
+        th = threading.Thread(target=target, daemon=True)
+        th.start()
+        th.join(deadline + 10)
+        result["alive"] = th.is_alive()
+        return Ran(result, pidfile)
+
+    r = run_when_ready(scenario)
+    assert not r.result["alive"], "ssh deadline did not fire"
+    assert "err" in r.result and r.result["elapsed"] < deadline_bound(r.deadline)
+    if not wait_gone(r.pids):
+        for pid in r.pids:
+            os.kill(pid, 9)
         pytest.fail("child process survived the group kill")
+
+
+def test_deadline_is_accurate(tmp_path):
+    """The one tight timing test: a trivial child, deadline <= elapsed < deadline + slack."""
+    script = _script(tmp_path, "exec sleep 30\n")
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        default_runner([str(script)], 1.0, ENV)
+    assert 1.0 <= time.monotonic() - t0 < deadline_bound(1.0)
 
 
 def test_default_runner_returns_exit_code_and_output(tmp_path):
@@ -194,27 +210,41 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
 
 
 def test_normal_exit_kills_grandchild_left_behind(tmp_path):
-    pidfile = tmp_path / "gc.pid"
-    script = _script(tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho done\n")
-    assert default_runner([str(script)], 5.0, ENV) == (0, b"done\n")
-    pid = int(pidfile.read_text())
-    if not wait_gone([pid]):
-        os.kill(pid, signal.SIGKILL)
+    def scenario(deadline):
+        pidfile = tmp_path / f"gc-{deadline}.pid"
+        script = _script(
+            tmp_path,
+            f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho done\n",
+            f"fake-ssh-{deadline}.sh",
+        )
+        return Ran(default_runner([str(script)], max(deadline, 10.0), ENV), pidfile)
+
+    r = run_when_ready(scenario)
+    assert r.result == (0, b"done\n")
+    if not wait_gone(r.pids):
+        for pid in r.pids:
+            os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild outlived a normally exited child")
 
 
 def test_hung_child_and_grandchild_killed_within_deadline(tmp_path, group_kill_spy):
-    pidfile = tmp_path / "gc.pid"
-    script = _script(tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n")
-    t0 = time.monotonic()
-    with pytest.raises(subprocess.TimeoutExpired):
-        default_runner([str(script)], 0.5, ENV)
-    assert time.monotonic() - t0 < 5
+    def scenario(deadline):
+        pidfile = tmp_path / f"gc-{deadline}.pid"
+        script = _script(
+            tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n", f"fake-ssh-{deadline}.sh"
+        )
+        t0 = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            default_runner([str(script)], deadline, ENV)
+        return Ran(time.monotonic() - t0, pidfile)
+
+    r = run_when_ready(scenario)
+    assert r.result < deadline_bound(r.deadline)
     assert len(group_kill_spy.kills()) >= 1
     assert group_kill_spy.reaped_when_killed == []
-    pid = int(pidfile.read_text())
-    if not wait_gone([pid]):
-        os.kill(pid, signal.SIGKILL)
+    if not wait_gone(r.pids):
+        for pid in r.pids:
+            os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild survived the deadline kill")
 
 

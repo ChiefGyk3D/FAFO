@@ -11,7 +11,7 @@ import logging
 
 import psutil
 import pytest
-from test_sources_claude import (
+from claude_helpers import (
     NOW,
     FakeMem,
     FakeProc,
