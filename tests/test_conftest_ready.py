@@ -39,7 +39,7 @@ def test_not_ready_then_ready_retries_with_longer_deadline(tmp_path, monkeypatch
 def test_never_ready_fails_on_a_quiet_machine(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 1.0, 1.0))
     seen = []
-    with pytest.raises(pytest.fail.Exception, match="never started within 12.0 s"):
+    with pytest.raises(pytest.fail.Exception, match="never started"):
         run_when_ready(make_scenario(tmp_path, None, seen))
     assert seen == [3.0, 6.0, 12.0]
 
@@ -50,10 +50,18 @@ def test_never_ready_fails_on_a_moderately_loaded_machine(tmp_path, monkeypatch)
         run_when_ready(make_scenario(tmp_path, None, []))
 
 
-def test_never_ready_skips_on_an_overloaded_machine(tmp_path, monkeypatch):
+def test_never_ready_still_fails_on_an_overloaded_machine(tmp_path, monkeypatch):
+    """High load never turns a regression into a skip: it fails with the full diagnostic."""
     monkeypatch.setattr(os, "getloadavg", lambda: (40.0, 1.0, 1.0))
-    with pytest.raises(pytest.skip.Exception, match="under load"):
-        run_when_ready(make_scenario(tmp_path, None, []))
+    seen = []
+    try:
+        with pytest.raises(
+            pytest.fail.Exception, match=r"3 attempts.*3\.0, 6\.0, 12\.0.*load average 40\.0"
+        ):
+            run_when_ready(make_scenario(tmp_path, None, seen))
+    except pytest.skip.Exception:
+        pytest.fail("a never-ready child was skipped under load instead of failing")
+    assert seen == [3.0, 6.0, 12.0]
 
 
 def test_ready_child_that_survives_still_fails_the_assertions(tmp_path):

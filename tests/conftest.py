@@ -147,7 +147,6 @@ class Ready:
 
 # One entry per scenario attempt, "ready" or "not_ready"; summarized at the end of the run.
 READINESS_LOG: list = []
-SKIP_LOAD = 16.0  # 1-minute load average above which a never-ready child skips instead of fails
 
 
 def run_when_ready(scenario, *, deadlines=(3.0, 6.0, 12.0)):
@@ -158,11 +157,11 @@ def run_when_ready(scenario, *, deadlines=(3.0, 6.0, 12.0)):
     only needs a short wait. A child that never recorded its pid was starved of CPU, not
     killed late: the pidfile is removed and the WHOLE scenario retried with the next, longer
     deadline. Only a ready child lets the caller's real assertions run (survivor, group,
-    elapsed within deadline_bound(ready.deadline)), so those are never loosened or skipped.
+    elapsed within deadline_bound(ready.deadline)), so those are never loosened.
 
-    If the child never starts in any attempt: pytest.fail, except pytest.skip when the 1-minute
-    load average is above SKIP_LOAD (a visible, counted skip, never a pass). Below a load
-    average of 4 it is always a fail: a quiet machine that cannot start `/bin/sh` is a bug.
+    If the child never starts in any attempt the test FAILS, at any load average. There is no
+    skip path: the load that issue #52 is about must not turn a real regression into a skip.
+    The failure message carries the attempt count, the deadlines and the 1-minute load average.
     """
     for n, deadline in enumerate(deadlines, 1):
         ran = scenario(deadline)
@@ -176,10 +175,10 @@ def run_when_ready(scenario, *, deadlines=(3.0, 6.0, 12.0)):
         except FileNotFoundError:
             pass
     load = os.getloadavg()[0]
-    msg = f"child never started within {deadlines[-1]} s under load (1 min load average {load:.1f})"
-    if load > SKIP_LOAD:
-        pytest.skip(msg)
-    pytest.fail(msg)
+    pytest.fail(
+        f"child never started in {len(deadlines)} attempts (deadlines "
+        f"{', '.join(str(d) for d in deadlines)} s, 1 min load average {load:.1f})"
+    )
 
 
 def pytest_terminal_summary(terminalreporter):
