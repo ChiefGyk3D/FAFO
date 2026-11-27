@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .repospec import valid_repo
+
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
 # Sources that need no options are on by default; the rest need a table in the file.
 DEFAULT_ENABLED = ("host", "claude", "codex", "gemini")
@@ -34,7 +36,6 @@ MAX_URL_LEN = 2048
 MAX_LIST = 100
 MAX_HOSTS = 32
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
-_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 _LABEL = re.compile(r"[A-Za-z0-9._@-]{1,100}")  # host name and ssh alias (same as sshro)
 _PEM_MARK = "-----" + "BEGIN"
 
@@ -159,7 +160,7 @@ def _opt_repos(value: object, name: str) -> list[str]:
     if not isinstance(value, list) or len(value) > MAX_LIST:
         raise _bad(name, f"must be a list of at most {MAX_LIST} owner/name strings")
     for item in value:
-        if not isinstance(item, str) or _REPO.fullmatch(item) is None:
+        if not isinstance(item, str) or not valid_repo(item):
             raise _bad(name, "must contain only owner/name strings")
     return list(value)
 

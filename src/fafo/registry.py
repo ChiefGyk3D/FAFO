@@ -148,6 +148,8 @@ def build(
         scfg = cfg.sources[name]
         if not scfg.enabled:
             continue
+        failed = ""
+        src = None
         try:
             src = table[name](scfg, cfg, env)
         except Skip as why:
@@ -158,9 +160,11 @@ def build(
             continue
         except ConfigError:
             raise
-        except (ValueError, TypeError, OSError, KeyError):
-            # Never include the exception text: it may carry a configured value.
-            raise ConfigError(f"sources.{name}: invalid configuration") from None
+        except Exception as exc:  # noqa: BLE001 - any factory failure is a config problem
+            failed = type(exc).__name__  # the class name only: the text may hold a value
+        if src is None:
+            # Raised outside the except block so the original exception is not chained.
+            raise ConfigError(f"sources.{name}: invalid configuration ({failed})")
         if src.name in seen:
             raise ConfigError(f"duplicate source name '{src.name}'")
         seen.add(src.name)

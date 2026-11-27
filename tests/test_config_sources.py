@@ -283,3 +283,51 @@ def test_example_file_has_no_secret_values():
     assert "-----" + "BEGIN" not in text
     assert "ghp_" not in text and "github_pat_" not in text
     assert chr(0x2014) not in text
+
+
+REPO_CASES = [
+    ("owner/name", True),
+    ("a/b", True),
+    ("my-org/my.repo_1", True),
+    ("..x/y", False),
+    ("../x", False),
+    ("owner/..", False),
+    (".", False),
+    ("owner/.", False),
+    ("./name", False),
+    ("a/b/c", False),
+    ("", False),
+    ("noslash", False),
+    ("a/" + "b" * 101, False),
+    ("a" * 200 + "/b", False),
+    ("a b/c", False),
+    ("a/b\n", False),
+    (None, False),
+    (5, False),
+]
+
+
+@pytest.mark.parametrize("repo,ok", REPO_CASES)
+def test_config_and_ghclient_validators_agree(repo, ok):
+    from fafo.ghapi import GhArgError, GhClient
+    from fafo.repospec import valid_repo
+
+    assert valid_repo(repo) is ok
+    try:
+        GhClient._check_repo(repo)
+        client_ok = True
+    except GhArgError:
+        client_ok = False
+    assert client_ok is ok
+
+
+@pytest.mark.parametrize("repo", [r for r, ok in REPO_CASES if not ok and isinstance(r, str)])
+@pytest.mark.parametrize("source", ["runners", "copilot"])
+def test_bad_repo_rejected_at_load_naming_option_only(tmp_path, source, repo):
+    import json
+
+    text = f"[sources.{source}]\nrepos = [{json.dumps(repo)}]\n"
+    msg = err(tmp_path, text)
+    assert f"sources.{source}.repos" in msg
+    if len(repo) > 3:
+        assert repo not in msg

@@ -115,13 +115,14 @@ def test_bad_option_exit_2_names_source_no_value(tmp_path, capsys):
     assert "hunter2" not in err + out
 
 
-def test_unexpected_error_exit_1_without_values(tmp_path, capsys):
+def test_factory_error_exit_2_names_class_not_text(tmp_path, capsys):
+    # Intended change (round 3): any factory failure is a value-free ConfigError, exit 2.
     def boom(s, c, e):
         raise RuntimeError("explode hunter2")
 
     p = conf(tmp_path, "codex")
     code, out, err = run_main(["doctor", "--config", str(p)], {"codex": boom}, capsys)
-    assert code == 1
+    assert code == 2
     assert "hunter2" not in err + out
     assert "RuntimeError" in err
 
@@ -224,7 +225,8 @@ def test_token_name_read_value_never_printed_by_doctor(tmp_path, capsys, monkeyp
         ["doctor", "--config", str(conf(tmp_path, "runners"))], {"runners": runners}, capsys
     )
     assert code == 0
-    assert http.sent and SENTINEL in http.sent[0]["Authorization"]  # the value really was used
+    # The value really was used, exactly as a bearer token (the transport is the only place seen).
+    assert http.sent and http.sent[0]["Authorization"] == f"Bearer {SENTINEL}"
     assert SENTINEL not in out + err + caplog.text
 
 
@@ -418,3 +420,20 @@ def test_module_doctor_with_no_config_real_sources_exit_matches_health(tmp_path,
     assert health <= {"ok", "absent", "down", "stale"}
     assert r.returncode == (0 if health <= {"ok", "absent"} else 1)
     assert b"config error" not in r.stderr and SENTINEL.encode() not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("cmd", ["run", "doctor"])
+def test_factory_failure_never_leaks_through_cli(tmp_path, capsys, caplog, cmd):
+    def boom(s, c, e):
+        raise RuntimeError("SENTINEL-SECRET-VALUE")
+
+    caplog.set_level("DEBUG")
+    snap = tmp_path / "s.json"
+    argv = [cmd, "--config", str(conf(tmp_path, "codex"))]
+    if cmd == "run":
+        argv += ["--snapshot", str(snap)]
+    code, out, err = run_main(argv, {"codex": boom}, capsys)
+    assert code == 2
+    assert "sources.codex" in err and "RuntimeError" in err
+    assert "SENTINEL" not in out + err + caplog.text
+    assert not snap.exists()

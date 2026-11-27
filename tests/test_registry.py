@@ -265,3 +265,76 @@ def test_runners_with_repos_and_no_token_env_var_still_builds(tmp_path):
     res = build(cfg, {})
     assert "runners" in [s.name for s in res.sources]
     assert "runners" in res.notes
+
+
+@pytest.mark.parametrize("exc", [RuntimeError, AttributeError, KeyError, ValueError, OSError, ZeroDivisionError])
+def test_any_factory_failure_becomes_value_free_config_error(tmp_path, exc, caplog):
+    cfg = only(tmp_path, "codex")
+
+    def boom(s, c, e):
+        raise exc("SENTINEL-SECRET-VALUE", "SENTINEL-ARG")
+
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ConfigError) as ei:
+        build_sources(cfg, {}, factories={"codex": boom})
+    err = ei.value
+    assert "sources.codex" in str(err)
+    assert exc.__name__ in str(err)
+    seen, e = [], err
+    while e is not None:
+        seen.append(e)
+        e = e.__cause__ or e.__context__
+    assert len(seen) == 1  # nothing chained: the original exception is not reachable
+    blob = " ".join(str(x) + repr(x) + repr(x.args) for x in seen) + caplog.text
+    assert "SENTINEL" not in blob
+
+
+def test_runners_gets_token_env_name_and_sends_bearer_token(tmp_path, monkeypatch, caplog):
+    """Registry-built real GhClient, fake transport: the header is seen only there."""
+    from fafo import ghapi
+
+    sent: list[tuple[str, str, dict]] = []
+
+    def fake_http(method, url, headers, timeout):
+        sent.append((method, url, dict(headers)))
+        return 200, {}, b'{"workflow_runs": []}'
+
+    monkeypatch.setattr(ghapi, "_httpx_http", fake_http)
+    monkeypatch.setenv("FAFO_TEST_GH", SENTINEL)
+    caplog.set_level(logging.DEBUG)
+    cfg = cfg_from(tmp_path, SAMPLE.replace("SESSIONS", str(tmp_path)))
+    env = {"FAFO_TEST_GH": SENTINEL}
+    by = {s.name: s for s in build(cfg, env).sources}
+    assert by["runners"].gh._token_env == "FAFO_TEST_GH"
+    assert by["runners"].gh is not by["copilot"]._runs_api
+    ctx = Ctx(cfg=cfg.sources["runners"], clock=lambda: 0.0, log=logging.getLogger("t"))
+    by["runners"].collect(ctx)
+    by["copilot"].collect(ctx)
+    assert sent
+    for method, url, headers in sent:
+        assert method == "GET"
+        assert url.startswith("https://api.github.com/repos/example-org/example-repo/")
+        assert headers["Authorization"] == f"Bearer {SENTINEL}"
+    blob = caplog.text + repr(by) + repr(vars(by["runners"].gh))
+    assert SENTINEL not in blob
+
+
+def test_token_failure_in_transport_does_not_leak(tmp_path, monkeypatch, caplog):
+    from fafo import ghapi
+
+    def failing(method, url, headers, timeout):
+        raise OSError("boom " + headers["Authorization"])
+
+    monkeypatch.setattr(ghapi, "_httpx_http", failing)
+    monkeypatch.setenv("FAFO_TEST_GH", SENTINEL)
+    caplog.set_level(logging.DEBUG)
+    cfg = cfg_from(tmp_path, SAMPLE.replace("SESSIONS", str(tmp_path)))
+    src = {s.name: s for s in build(cfg, {"FAFO_TEST_GH": SENTINEL}).sources}["runners"]
+    ctx = Ctx(cfg=cfg.sources["runners"], clock=lambda: 0.0, log=logging.getLogger("t"))
+    with pytest.raises(Exception) as ei:
+        src.collect(ctx)
+    e, texts = ei.value, []
+    while e is not None:
+        texts.append(str(e) + repr(e))
+        e = e.__cause__ or e.__context__
+    assert SENTINEL not in " ".join(texts) + caplog.text
