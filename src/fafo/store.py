@@ -119,8 +119,9 @@ _SPEC = {
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
     "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
-    "rss": _int,
+    "rss": _int, "name": _str, "address": _str,
 }
+_SESSION_OPTIONAL = {"name": "", "address": ""}  # absent in older snapshots
 
 
 def _check(cls, data, spec):
@@ -147,6 +148,7 @@ def _list(cls, data):
 def _session(data) -> Session:
     if type(data) is not dict:
         raise TypeError("bad session")
+    data = {**_SESSION_OPTIONAL, **data}
     _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None})
     return Session(**{**data, "project": _build(Stamped, data["project"])})
 
