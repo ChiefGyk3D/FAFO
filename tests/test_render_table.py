@@ -202,3 +202,33 @@ def test_json_stable_and_none():
     assert format_json(golden_snapshot(), NOW) == format_json(golden_snapshot(), NOW)
     assert json.loads(format_json(None, NOW)) == {"status": "no-collector"}
     assert json.loads(format_json(golden_snapshot(), NOW + 30))["status"] == "stale"
+
+
+def _strict(text):
+    def refuse(name):
+        raise AssertionError(f"non-standard JSON constant {name}")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+def test_format_json_is_strict_json_with_nonfinite_values():
+    snap = golden_snapshot()
+    snap.host["load1"] = float("nan")
+    snap.host["nested"] = {"a": [float("inf"), -float("inf"), 1.5]}
+    snap.quota["claude"]["5h"] = float("nan")
+    out = format_json(snap, NOW)
+    doc = _strict(out)
+    assert doc["host"]["load1"] is None
+    assert doc["host"]["nested"] == {"a": [None, None, 1.5]}
+    assert doc["quota"]["claude"]["5h"] is None
+    assert "NaN" not in out and "Infinity" not in out
+
+
+def test_format_json_nonfinite_age_and_deep_nesting_do_not_raise():
+    snap = golden_snapshot()
+    deep: object = 1.0
+    for _ in range(500):
+        deep = [deep]
+    snap.host["deep"] = deep
+    snap.taken = float("nan")
+    _strict(format_json(snap, NOW))

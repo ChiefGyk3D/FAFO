@@ -1,0 +1,65 @@
+# FAFO collector as a systemd USER unit.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp fafo.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now fafo
+#
+# Check it:  systemctl --user status fafo      journalctl --user -u fafo
+# Stop it:   systemctl --user disable --now fafo
+#
+# This file holds no secrets. See the commented Environment= example below.
+
+[Unit]
+Description=FAFO collector (read-only observer of AI agents)
+
+[Service]
+Type=simple
+# %h is the home directory of the user running the unit. This path is where `pipx install`
+# puts the command. For a venv install use, for example,
+# %h/.local/share/fafo-venv/bin/fafo run (see README.md in this directory).
+ExecStart=%h/.local/bin/fafo run
+
+# Restart only after a failure, not after a clean stop, and wait a few seconds so a crash loop
+# does not spin.
+Restart=on-failure
+RestartSec=5
+
+# Optional config file. Without it FAFO runs its four local sources with defaults.
+# To use a config file:
+# ExecStart=%h/.local/bin/fafo run --config %h/.config/fafo/fafo.toml
+
+# Tokens: put NO token value in this file. If a source needs one, name the variable in the
+# config (token_env) and set it from a drop-in or an EnvironmentFile that is mode 0600:
+# Environment=EXAMPLE_TOKEN_VARIABLE_NAME=<set it in a private drop-in, not here>
+# The token_file option (planned, not implemented yet) is the better route: a file can be
+# rotated without restarting the unit and never shows up in `systemctl show`.
+
+# Directories created for the service. RuntimeDirectory is %t/fafo (the default snapshot
+# location: $XDG_RUNTIME_DIR/fafo) and is removed when the service stops, so a stopped
+# collector leaves no stale snapshot. StateDirectory is ~/.local/state/fafo.
+RuntimeDirectory=fafo
+StateDirectory=fafo
+
+# Hardening. Every line here works in a user unit.
+# The collector never gains new privileges through setuid or file capabilities.
+NoNewPrivileges=yes
+# A private /tmp and /var/tmp, invisible to other services.
+PrivateTmp=yes
+# The whole file system is read-only for the service except the paths below.
+ProtectSystem=strict
+ReadWritePaths=%t/fafo %h/.local/state/fafo
+# ProtectHome is deliberately NOT set: even read-only, hiding or restricting home would block
+# reading ~/.claude/sessions and the other agent state directories FAFO observes.
+# Only local sockets and IP: the collector talks to a local LLM server and the GitHub API.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Forbid changing the execution domain (personality) of the process.
+LockPersonality=yes
+# No capabilities at all (an empty list drops every one).
+CapabilityBoundingSet=
+# MemoryDenyWriteExecute=yes is omitted on purpose: it can break Python extension modules
+# that map memory writable and executable, and the gain here is small.
+
+[Install]
+WantedBy=default.target

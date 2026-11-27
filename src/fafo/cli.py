@@ -46,13 +46,16 @@ def _safe(cfg: Config, text: object, cap: int = DETAIL_MAX) -> str:
 
 
 def add_render_commands(subparsers: Any) -> None:
-    """Extension point: another task adds --table, --json and --sessions here. No-op for now."""
+    """Extension point: registers table, json, sessions and tui (see render/commands.py)."""
+    from .render import commands
+
+    commands.add_render_commands(subparsers)
 
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fafo", description="Read-only observer of AI agents.")
     p.add_argument("--version", action="version", version=f"fafo {fafo.__version__}")
-    sub = p.add_subparsers(dest="command", required=True, metavar="{run,doctor}")
+    sub = p.add_subparsers(dest="command", required=True, metavar="{run,doctor,table,json,sessions,tui}")
     run = sub.add_parser("run", help="run the collector until SIGINT or SIGTERM")
     run.add_argument("--config", type=Path, default=None, help="TOML config file")
     run.add_argument("--snapshot", type=Path, default=None, help="snapshot file to write")
@@ -182,6 +185,9 @@ def main(argv: list[str] | None = None, *, factories: Mapping[str, Factory] | No
             return _cmd_run(args, factories)
         if args.command == "doctor":
             return _cmd_doctor(args, factories)
+        handler = getattr(args, "handler", None)
+        if handler is not None:
+            return handler(args)
         return EXIT_ERROR
     except ConfigError as exc:
         text = sanitize_text(mask_credentials(str(exc).replace("\n", " ")), 300)
