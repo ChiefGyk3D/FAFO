@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 import pytest
-from claude_helpers import LIVE, ctx, make_dir, source
+from claude_helpers import LIVE, FakeProc, StubGit, ctx, make_dir, source
 
 from fafo import transcript
 from fafo.config import ConfigError, load_config
@@ -99,3 +99,19 @@ def test_label_never_in_logs(tmp_path, caplog):
     res = source(d, LIVE).collect(ctx())
     assert {s.pid: s.task for s in res.sessions}[4000] == "Edit: unique-secret-name.py"
     assert "unique-secret-name" not in caplog.text
+
+
+def test_transcript_label_and_idle_last_known_repo_both_show(tmp_path):
+    """task70 x task71: the label is the task, the remembered repo is the project."""
+    repo_dir = tmp_path / "chatty-kathy"
+    repo_dir.mkdir()
+    d = make_dir(tmp_path, ("4000",))
+    add_transcript(tmp_path, SID_BUSY, [tool_line("Bash", command="make all")])
+    procs = [FakeProc(4000), FakeProc(7000, 4000, ["/bin/a"], cwd=str(repo_dir))]
+    src = source(d, {4000: "111000"}, procs, StubGit({str(repo_dir): str(repo_dir)}))
+    live = {s.pid: s for s in src.collect(ctx()).sessions}[4000]
+    assert (live.project.value, live.project_source, live.task) == ("chatty-kathy", "live", "Bash: make")
+    src.ps.table.pop(7000)  # the repo child exits: the session is idle in a bare folder
+    idle = {s.pid: s for s in src.collect(ctx()).sessions}[4000]
+    assert (idle.project.value, idle.project_source) == ("chatty-kathy", "last")
+    assert idle.task == "Bash: make"

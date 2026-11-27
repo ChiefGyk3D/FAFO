@@ -232,3 +232,11 @@ def test_format_json_nonfinite_age_and_deep_nesting_do_not_raise():
     snap.host["deep"] = deep
     snap.taken = float("nan")
     _strict(format_json(snap, NOW))
+
+
+def test_table_shows_last_known_project_with_tilde():
+    snap = golden_snapshot()
+    snap.sessions[0].project = Stamped("chatty-kathy", NOW)
+    snap.sessions[0].project_source = "last"
+    out = format_table(views(snap), 144)
+    assert "chatty-kathy~" in out

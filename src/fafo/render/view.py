@@ -151,6 +151,7 @@ class SessionNode:
     age: str = ""
     children: list[ProcNode] = field(default_factory=list)
     children_hidden: int = 0
+    project_source: str = "live"
 
 
 @dataclass
@@ -283,6 +284,14 @@ def _proc_node(p: Proc, all_stale: bool, snap_age: str) -> ProcNode:
     )
 
 
+def project_label(value: str, source: str, cap: int = _CAP_PROJECT) -> str:
+    """Project name for display, at most cap characters; a trailing `~` marks a last-known repo
+    of an idle session (the name is cut to cap - 1 first so the marker always fits)."""
+    if source == "last":
+        return _s(value, cap - 1) + "~"
+    return _s(value, cap)
+
+
 def _session_node(
     s: Session, now: float, stale_after_s: float, all_stale: bool, snap_age: str
 ) -> SessionNode:
@@ -295,8 +304,9 @@ def _session_node(
         address=_s(s.address or s.session_id, _CAP_ID),
         pid=s.pid,
         agent=_s(s.agent, _CAP_SHORT),
-        project=_s(s.project.value, _CAP_PROJECT),
+        project=project_label(s.project.value, s.project_source),
         project_rule=_s(s.project_rule, _CAP_SHORT),
+        project_source=_s(s.project_source, _CAP_SHORT),
         task=_s(s.task, _CAP_TASK),
         state=_s(s.state, _CAP_SHORT),
         branch=_s(s.branch, _CAP_SHORT),

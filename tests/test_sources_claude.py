@@ -14,7 +14,8 @@ from pathlib import Path
 import pytest
 
 from fafo import attribution
-from fafo.source import SourceResult
+from fafo.config import SourceCfg
+from fafo.source import Ctx, SourceResult
 from fafo.sources import claude
 from fafo.sources.claude import ClaudeSource
 
@@ -457,3 +458,145 @@ def test_create_time_change_between_reads_drops_the_row(tmp_path):
     Replaced.reads = 0
     res = source(make_dir(tmp_path, ("4000",)), {4000: "111000"}, [Replaced(4000, 1)])
     assert res.collect(ctx()).sessions == []
+
+
+# ---- last-known project for idle sessions (FAFO#70) -------------------------------------------
+
+
+class Clock:
+    def __init__(self, t=NOW):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _ctx(clock: Clock) -> Ctx:
+    return Ctx(cfg=SourceCfg(), clock=clock, log=logging.getLogger("test-claude"))
+
+
+def _repo_env(tmp_path, names=("4000",), ticks=None, repo="chatty-kathy"):
+    d = make_dir(tmp_path, names)
+    repo_dir = tmp_path / repo
+    repo_dir.mkdir()
+    procs = [FakeProc(int(n)) for n in names] + [
+        FakeProc(7000 + i, int(n), ["/bin/a"], cwd=str(repo_dir)) for i, n in enumerate(names)
+    ]
+    git = StubGit({str(repo_dir): str(repo_dir)})
+    src = source(d, ticks or {int(n): f"11100{int(n) - 4000}" for n in names}, procs, git)
+    return src, repo_dir
+
+
+def _drop_children(src, names=("4000",)):
+    for i, _ in enumerate(names):
+        src.ps.table.pop(7000 + i)
+
+
+def _get(res, pid):
+    return by_pid(res)[pid]
+
+
+def test_idle_session_keeps_last_repo_marked_last(tmp_path):
+    clock = Clock()
+    src, _ = _repo_env(tmp_path)
+    live = _get(src.collect(_ctx(clock)), 4000)
+    assert (live.project.value, live.project_source) == ("chatty-kathy", "live")
+    _drop_children(src)
+    clock.t += 60
+    idle = _get(src.collect(_ctx(clock)), 4000)
+    assert idle.project.value == "chatty-kathy"
+    assert idle.project_source == "last"
+
+
+def test_never_attributed_falls_back_to_folder(tmp_path):
+    src, _ = _repo_env(tmp_path)
+    _drop_children(src)
+    s = _get(src.collect(_ctx(Clock())), 4000)
+    assert s.project_source == "folder"
+    assert s.project.value == os.path.basename(json.loads((src.dir / "4000.json").read_text())["cwd"])
+
+
+def test_different_session_never_inherits_repo(tmp_path):
+    clock = Clock()
+    src, _ = _repo_env(tmp_path, names=("4000", "4001"), ticks={4000: "111000", 4001: "111001"})
+    # only 4000 has a child in the repo; remove 4001's child
+    src.ps.table.pop(7001)
+    got = by_pid(src.collect(_ctx(clock)))
+    assert got[4000].project_source == "live"
+    assert got[4001].project_source == "folder"
+    assert got[4001].project.value != "chatty-kathy"
+    _drop_children(src, ("4000",))
+    clock.t += 30
+    got = by_pid(src.collect(_ctx(clock)))
+    assert got[4000].project.value == "chatty-kathy" and got[4000].project_source == "last"
+    assert got[4001].project.value != "chatty-kathy" and got[4001].project_source == "folder"
+
+
+def test_remembered_name_dropped_after_24h_absent(tmp_path):
+    clock = Clock()
+    src, _ = _repo_env(tmp_path)
+    src.collect(_ctx(clock))
+    assert len(src._last_repo) == 1
+    # the session id disappears (registry file gone) for just under, then over, 24 h
+    reg = src.dir / "4000.json"
+    saved = reg.read_text()
+    reg.unlink()
+    clock.t += claude.LAST_REPO_TTL_S - 1
+    src.collect(_ctx(clock))
+    assert len(src._last_repo) == 1
+    clock.t += 2
+    src.collect(_ctx(clock))
+    assert len(src._last_repo) == 0
+    reg.write_text(saved)
+    _drop_children(src)
+    s = _get(src.collect(_ctx(clock)), 4000)
+    assert s.project_source == "folder"
+
+
+def test_remembered_cache_is_bounded(tmp_path):
+    src, _ = _repo_env(tmp_path)
+    clock = Clock()
+    for i in range(claude.MAX_LAST_REPOS + 50):
+        clock.t += 1
+        src._remember(f"sid-{i}", f"repo-{i}", clock.t)
+    assert len(src._last_repo) == claude.MAX_LAST_REPOS
+    assert "sid-0" not in src._last_repo
+    assert f"sid-{claude.MAX_LAST_REPOS + 49}" in src._last_repo
+
+
+def _set_cwd(src, name, cwd):
+    p = src.dir / f"{name}.json"
+    doc = json.loads(p.read_text())
+    doc["cwd"] = str(cwd)
+    p.write_text(json.dumps(doc))
+
+
+def test_cwd_git_attribution_is_remembered_and_marked_when_idle_elsewhere(tmp_path):
+    clock = Clock()
+    src, repo_dir = _repo_env(tmp_path)
+    _drop_children(src)
+    _set_cwd(src, "4000", repo_dir)
+    live = _get(src.collect(_ctx(clock)), 4000)
+    assert (live.project.value, live.project_rule, live.project_source) == (
+        "chatty-kathy", "cwd-git", "live")
+    plain = tmp_path / "plain-folder"
+    plain.mkdir()
+    _set_cwd(src, "4000", plain)
+    clock.t += 60
+    idle = _get(src.collect(_ctx(clock)), 4000)
+    assert (idle.project.value, idle.project_source) == ("chatty-kathy", "last")
+
+
+def test_outage_over_a_day_expires_the_remembered_repo(tmp_path):
+    clock = Clock()
+    src, _ = _repo_env(tmp_path)
+    assert _get(src.collect(_ctx(clock)), 4000).project_source == "live"
+    _drop_children(src)
+    away = tmp_path / "sessions-away"
+    src.dir.rename(away)
+    clock.t += claude.LAST_REPO_TTL_S + 60
+    assert src.collect(_ctx(clock)).status == "absent"  # registry unavailable
+    away.rename(src.dir)
+    clock.t += 1
+    back = _get(src.collect(_ctx(clock)), 4000)
+    assert back.project_source == "folder"  # the stale memory did not survive the outage

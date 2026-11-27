@@ -87,6 +87,13 @@ only. `"prompt"` shows the first 60 characters of your last message. Masking is 
 (token shapes and keyword phrases such as `password: ...`), so it may still display other
 sensitive prose, on screen and in screenshots. Use it only if you are comfortable with that.
 
+### Snapshot compatibility
+
+An idle session shows its last-known repo with a trailing `~`. The snapshot records that in a
+per-session `project_source` key, written only when it is not `live`. A snapshot with no such
+session has the same keys as before. A snapshot that does contain one is refused by older FAFO
+readers by design: the snapshot schema is strict, and the version number is not bumped for this.
+
 ### Security notes
 
 - Read-only: FAFO never kills, dispatches, merges or writes to the things it observes. Its
@@ -108,5 +115,7 @@ sensitive prose, on screen and in screenshots. Use it only if you are comfortabl
 
 Status: early development. See `docs/superpowers/specs/` for the design and
 `docs/superpowers/plans/` for the implementation plan.
+
+Contributing and review process: see `CONTRIBUTING.md`.
 
 License: Apache-2.0. Security reports: see `SECURITY.md`.

@@ -803,3 +803,17 @@ def test_unchanged_file_after_resume_does_not_rebuild(snap_path, monkeypatch):
             assert "src-1" in app.dump()
 
     run(go())
+
+
+def test_tui_shows_last_known_project_with_tilde(snap_path):
+    last = sess(1, "x1", "aaa", "chatty-kathy", state="idle")
+    last.project_source = "last"
+    write_snapshot(snap_path, snap(sessions=[last]))
+
+    async def go():
+        app = make(snap_path)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await first(pilot, app)
+            assert "chatty-kathy~" in app.dump()
+
+    run(go())
