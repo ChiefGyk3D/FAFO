@@ -40,7 +40,7 @@ def test_round_trip_has_schema_and_every_session_id(tmp_path):
     path = tmp_path / "views.json"
     write_views(path, views, generated=NOW)
     doc = json.loads(path.read_text())
-    assert doc["schema"] == 1
+    assert doc["schema"] == 2
     assert doc["generated"] == NOW
     assert doc["status"] == "ok"
     assert [s["session_id"] for s in doc["sessions"]] == ["sid-2", "sid-1", "sid-3"] or sorted(
@@ -158,3 +158,77 @@ def test_reader_never_sees_partial_json_during_writes(tmp_path):
         t.join(5)
     assert reads[0] > 0
     assert not bad, bad[:3]
+
+
+def big_snapshot(n=300):
+    sessions = [
+        sess(i + 1, f"sid-{i + 1:04d}", name=f"name{i + 1}", project=f"p{i % 7}") for i in range(n)
+    ]
+    return Snapshot(version=SNAPSHOT_VERSION, taken=NOW, host={}, sessions=sessions)
+
+
+def test_hidden_session_found_in_index(tmp_path):
+    s = big_snapshot()
+    views = build_views(s, NOW)
+    assert len(views.sessions) == 200
+    path = tmp_path / "views.json"
+    write_views(path, views, snapshot=s, generated=NOW)
+    doc = json.loads(path.read_text())
+    shown = {x["session_id"] for x in doc["sessions"]}
+    hidden = [x for x in doc["session_index"] if x["session_id"] not in shown]
+    assert len(hidden) == 100 and doc["sessions_hidden"] == 100
+    pid = hidden[0]["pid"]  # a session the display cap dropped
+    assert hidden[0]["name"] == f"name{pid}" and hidden[0]["address"] == f"sid-{pid:04d}"
+    assert len(doc["session_index"]) == 300
+
+
+def test_index_order_cap_and_cloud_excluded():
+    s = big_snapshot(5)
+    s.sessions.reverse()
+    s.sessions.append(
+        Session(
+            pid=0, agent="copilot", session_id="cloud1", project=Stamped("c", NOW),
+            project_rule="r", task="t", state="busy", branch="b", worktree="w",
+            started=1.0, cpu=0.0, rss=0,
+        )
+    )
+    doc = views_to_dict(build_views(s, NOW), snapshot=s, generated=NOW)
+    assert [x["pid"] for x in doc["session_index"]] == [1, 2, 3, 4, 5]
+    assert set(doc["session_index"][0]) == {
+        "session_id", "name", "pid", "project", "state", "address",
+    }
+    many = big_snapshot(2500)
+    idx = views_to_dict(build_views(many, NOW), snapshot=many, generated=NOW)["session_index"]
+    assert len(idx) == 2000 and idx[-1]["pid"] == 2000
+
+
+def test_index_is_sanitized():
+    s = big_snapshot(1)
+    s.sessions[0].name = "a" + CTRL + "b"
+    s.sessions[0].address = "x" * 500
+    doc = views_to_dict(build_views(s, NOW), snapshot=s, generated=NOW)
+    text = json.dumps(doc["session_index"], ensure_ascii=False)
+    entry = doc["session_index"][0]
+    assert chr(27) not in text and chr(7) not in text and chr(0) not in text
+    assert len(entry["address"]) <= 128 and not [c for c in entry["name"] if ord(c) < 32]
+    assert entry["name"]
+
+
+def test_trimmed_case_keeps_index_intact(tmp_path):
+    sessions = [sess(i + 1, f"sid-{i + 1:04d}") for i in range(300)]
+    procs = [proc(100000 + s * 1000 + c, s + 1) for s in range(300) for c in range(256)]
+    s = Snapshot(version=SNAPSHOT_VERSION, taken=NOW, host={}, sessions=sessions, procs=procs)
+    path = tmp_path / "views.json"
+    write_views(path, build_views(s, NOW), snapshot=s, generated=NOW)
+    raw = path.read_bytes()
+    assert len(raw) <= export.MAX_BYTES
+    doc = json.loads(raw)
+    assert [x["pid"] for x in doc["session_index"]] == list(range(1, 301))
+
+
+def test_session_trim_keeps_index(monkeypatch):
+    s = big_snapshot(50)
+    monkeypatch.setattr(export, "MAX_BYTES", 12000)
+    doc = json.loads(export.encode_bounded(views_to_dict(build_views(s, NOW), snapshot=s)))
+    assert len(doc["session_index"]) == 50
+    assert len(doc["sessions"]) < 50 and doc["sessions_hidden"] == 50 - len(doc["sessions"])

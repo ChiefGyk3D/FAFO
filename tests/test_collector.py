@@ -385,7 +385,7 @@ def test_views_json_written_every_tick_next_to_snapshot(tmp_path):
             except (OSError, ValueError):
                 doc = None
             if doc:
-                assert doc["schema"] == 1
+                assert doc["schema"] == 2
                 seen.add(doc["generated"])
             time.sleep(0.03)
         assert len(seen) >= 3

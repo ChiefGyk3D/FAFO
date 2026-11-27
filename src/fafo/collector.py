@@ -232,7 +232,7 @@ class Collector:
         """Write views.json from the snapshot just written. Never raises; logs no values."""
         try:
             now = self._clock()
-            write_views(self._views_path, build_views(snap, now), generated=now)
+            write_views(self._views_path, build_views(snap, now), snapshot=snap, generated=now)
         except Exception as exc:  # noqa: BLE001 - views are optional, the snapshot is not
             _log.warning("views.json write failed: %s", type(exc).__name__)
 
