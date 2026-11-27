@@ -42,7 +42,9 @@ class Config:
         """Replace configured hostnames/IPs with their aliases (longest match first)."""
         if self._alias_re is None:
             return text
-        return self._alias_re.sub(lambda m: self._alias_map[m.group(0).lower()], text)
+        return self._alias_re.sub(
+            lambda m: self._alias_map.get(m.group(0).casefold(), "<host>"), text
+        )
 
 
 def _default_snapshot_path() -> Path:
@@ -110,7 +112,7 @@ def _compile_aliases(aliases: dict[str, str]) -> re.Pattern[str] | None:
     body = "|".join(re.escape(n) for n in names)
     # Do not match inside a longer hostname or IP (10.0.0.1 inside 10.0.0.12).
     # Hostnames are case-insensitive, so match any case variant.
-    return re.compile(rf"(?<![\w.-])(?:{body})(?![\w-])(?!\.\w)", re.IGNORECASE)
+    return re.compile(rf"(?<![\w.-])(?:{body})(?![\w-])(?!\.\w)", re.IGNORECASE | re.ASCII)
 
 
 def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
@@ -119,9 +121,13 @@ def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
     for k, v in aliases.items():
         if not k.strip():
             raise ConfigError("'aliases' has an empty or blank host key")
-        if k.lower() in lowered:
+        if not k.isascii():
+            raise ConfigError(
+                f"'aliases' key {k!r} is not ASCII: hostnames must be ASCII (use punycode)"
+            )
+        if k.casefold() in lowered:
             raise ConfigError(f"'aliases' key '{k}' duplicates another key except for case")
-        lowered[k.lower()] = v
+        lowered[k.casefold()] = v
     return lowered
 
 

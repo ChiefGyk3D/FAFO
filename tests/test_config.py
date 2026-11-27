@@ -166,3 +166,35 @@ def test_case_duplicate_alias_keys_rejected(tmp_path):
     p = write(tmp_path, '[aliases]\n"Host.invalid" = "a"\n"host.INVALID" = "b"\n')
     with pytest.raises(ConfigError, match="case"):
         load_config(p)
+
+
+@pytest.mark.parametrize("cp", [0x130, 0x131, 0x17F, 0x212A])
+def test_unicode_lookalikes_never_raise_and_never_match(tmp_path, cp):
+    cfg = load_config(write(tmp_path, '[aliases]\n"fileserver.example.invalid" = "fs"\n'))
+    # Replace each ASCII letter that has a Unicode case-fold lookalike in turn.
+    text = "fileserver.example.invalid"
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            lookalike = text[:i] + chr(cp) + text[i + 1 :]
+            assert cfg.alias(lookalike) == lookalike
+    assert cfg.alias("f" + chr(0x130) + "leserver.example.invalid") == (
+        "f" + chr(0x130) + "leserver.example.invalid"
+    )
+    assert cfg.alias("see " + text + " " + chr(cp)) == "see fs " + chr(cp)
+
+
+def test_non_ascii_alias_key_rejected(tmp_path):
+    p = write(tmp_path, '[aliases]\n"f' + chr(0xE9) + 'server.invalid" = "fs"\n')
+    with pytest.raises(ConfigError, match="ASCII"):
+        load_config(p)
+
+
+def test_punycode_alias_key_accepted(tmp_path):
+    cfg = load_config(write(tmp_path, '[aliases]\n"xn--fserver-bya.invalid" = "fs"\n'))
+    assert cfg.alias("XN--FSERVER-BYA.invalid") == "fs"
+
+
+def test_alias_lookup_miss_yields_placeholder_not_raw_text(tmp_path):
+    cfg = load_config(write(tmp_path, '[aliases]\n"h.invalid" = "x"\n'))
+    object.__setattr__(cfg, "_alias_map", {})
+    assert cfg.alias("see h.invalid") == "see <host>"
