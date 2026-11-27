@@ -166,7 +166,7 @@ def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
         assert time.monotonic() - t0 < 5
         assert "gpus" not in box["res"].host
         assert box["res"].host["load1"] == 0.5
-        if pid is not None and wait_gone([pid], 3.0):
+        if pid is not None and wait_gone([pid]):
             pid = None
         assert pid is None, "child survived the deadline"
     finally:
@@ -271,7 +271,7 @@ def test_normal_exit_leaves_no_grandchild(tmp_path):
     )
     assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
     pid = int(pidfile.read_text())
-    if wait_gone([pid], 3.0):
+    if wait_gone([pid]):
         return
     os.kill(pid, 9)
     raise AssertionError("grandchild survived a normal exit")
