@@ -265,6 +265,8 @@ def test_example_file_with_every_example_block_loads_and_builds(tmp_path):
     assert cfg.sources["ollama"].options["url"].startswith("http://")
     assert cfg.sources["runners"].options["hosts"][0]["name"] == "runner-a"
     assert cfg.sources["copilot"].options["repos"] == ["owner/name"]
+    for name in ("runners", "copilot"):
+        assert cfg.sources[name].options["token_file"] == "/run/user/1000/fafo-github-token"
     factories = {n: (lambda s, c, e, n=n: Stub(n)) for n in cfg.sources}
     res = build(cfg, {"FAFO_GITHUB_TOKEN": "x"}, factories=factories)
     assert sorted(s.name for s in res.sources) == sorted(cfg.sources)
@@ -331,3 +333,63 @@ def test_bad_repo_rejected_at_load_naming_option_only(tmp_path, source, repo):
     assert f"sources.{source}.repos" in msg
     if len(repo) > 3:
         assert repo not in msg
+
+
+# --- token_file: an exact-location path key, never read by the config -------------------------
+
+
+@pytest.mark.parametrize("source", ["runners", "copilot"])
+def test_token_file_absolute_path_accepted_and_not_read(tmp_path, source):
+    missing = tmp_path / "does-not-exist-token"
+    cfg = load_config(write(tmp_path, f'[sources.{source}]\ntoken_file = "{missing}"\n'))
+    assert cfg.sources[source].options["token_file"] == str(missing)
+
+
+def test_token_file_default_is_unset_and_may_pair_with_token_env(tmp_path):
+    cfg = load_config(write(tmp_path, '[sources.runners]\ntoken_env = "FAFO_GH_TOKEN"\n'))
+    assert "token_file" not in cfg.sources["runners"].options
+    body = '[sources.copilot]\ntoken_env = "FAFO_GH_TOKEN"\ntoken_file = "/run/example/gh-token"\n'
+    opts = load_config(write(tmp_path, body)).sources["copilot"].options
+    assert opts["token_env"] == "FAFO_GH_TOKEN" and opts["token_file"] == "/run/example/gh-token"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "relative/token",
+        "~/token",
+        "justaname",
+        "/a" + chr(10) + "b",
+        "/a" + chr(0) + "b",
+        "/a" + chr(127),
+        "/" + "a" * 4096,
+        "-----" + "BEGIN PRIVATE KEY-----",
+        "/x/-----" + "BEGIN/y",
+        "",
+    ],
+)
+def test_token_file_bad_values_rejected_without_echo(tmp_path, value):
+    import json
+
+    literal = json.dumps(value).replace(chr(127), "\\u007f")
+    msg = err(tmp_path, f"[sources.runners]\ntoken_file = {literal}\n")
+    assert "token_file" in msg
+    assert not value or value not in msg
+
+
+def test_token_file_wrong_type_rejected(tmp_path):
+    assert "token_file" in err(tmp_path, "[sources.runners]\ntoken_file = 5\n")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '[sources.ollama]\ntoken_file = "/x"\n',
+        '[sources.claude]\ntoken_file = "/x"\n',
+        '[[sources.runners.hosts]]\nname = "a"\ntoken_file = "/x"\n',
+        '[aliases]\ntoken_file = "x"\n',
+    ],
+)
+def test_token_file_only_allowed_at_the_exact_locations(tmp_path, body):
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, body))
