@@ -23,12 +23,13 @@ import json
 import logging
 import math
 import os
-import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+from .repospec import valid_repo
 
 MAX_BODY = 2 * 1024 * 1024
 MAX_DEPTH = 16
@@ -38,7 +39,6 @@ PER_PAGE = 30
 REQUEST_TIMEOUT_S = 10.0
 _MAX_BACKOFF_S = 3600.0
 _DEFAULT_BACKOFF_S = 60.0
-_REPO = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}")
 _STATUSES = frozenset({"queued", "in_progress", "completed", "waiting", "requested", "pending"})
 
 _log = logging.getLogger("fafo.ghapi")
@@ -176,7 +176,7 @@ class GhClient:
 
     @staticmethod
     def _check_repo(repo: str) -> None:
-        if not isinstance(repo, str) or not _REPO.fullmatch(repo) or ".." in repo:
+        if not valid_repo(repo):
             raise GhArgError("repo must be owner/name")
 
     def _set_not_before(self, headers: Mapping[str, str], now: float) -> float:
@@ -212,12 +212,17 @@ class GhClient:
         if entry is not None and entry.etag:
             headers["If-None-Match"] = entry.etag
         self._requests += 1
+        failed = ""
         try:
             status, resp_headers, body = self._http("GET", self._base + path, headers, REQUEST_TIMEOUT_S)
         except (OSError, ValueError, RuntimeError) as exc:
-            raise GhError(f"github request failed ({type(exc).__name__})") from None
+            failed = type(exc).__name__
         finally:
             del token, headers
+        if failed:
+            # Raised outside the except block: the transport error (which may echo the
+            # request headers) must not stay reachable through __context__.
+            raise GhError(f"github request failed ({failed})")
         hdr = {str(k).lower(): str(v) for k, v in resp_headers.items()}
         now = self._clock()
         _log.debug("github GET status=%s", status)

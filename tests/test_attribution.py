@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import pid_alive
+from conftest import wait_gone
 
 from fafo import attribution
 from fafo.attribution import SubprocessGit, attribute
@@ -271,11 +271,7 @@ def test_timeout_kills_whole_process_group(tmp_path: Path):
     script.chmod(0o700)
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 0.5) is None
     child = int(pidfile.read_text())
-    for _ in range(50):
-        if not pid_alive(child):
-            break
-        time.sleep(0.05)
-    assert not pid_alive(child)
+    assert wait_gone([child]), "grandchild survived the group kill"
 
 
 def test_oversize_kills_whole_process_group(tmp_path: Path):
@@ -290,11 +286,7 @@ def test_oversize_kills_whole_process_group(tmp_path: Path):
     script.chmod(0o700)
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 5) is None
     child = int(pidfile.read_text())
-    for _ in range(50):
-        if not pid_alive(child):
-            break
-        time.sleep(0.05)
-    assert not pid_alive(child)
+    assert wait_gone([child]), "grandchild survived the group kill"
 
 
 def test_global_git_config_cannot_supply_remote(tmp_path: Path, monkeypatch):
@@ -331,8 +323,4 @@ def test_normal_exit_leaves_no_grandchild(tmp_path: Path):
     script.chmod(0o700)
     assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
     child = int(pidfile.read_text())
-    for _ in range(60):
-        if not pid_alive(child):
-            break
-        time.sleep(0.05)
-    assert not pid_alive(child)
+    assert wait_gone([child]), "grandchild survived the group kill"
