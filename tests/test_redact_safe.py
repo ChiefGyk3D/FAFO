@@ -43,7 +43,7 @@ TABLE = [
     ("bash -c hides trailing args", ["bash", "-c", "x", "status", "y"], "bash -c <script>"),
     ("node -e", ["node", "-e", "console.log(1)"], "node -e <script>"),
     ("git commit message", ["git", "commit", "-m", "message with secret"], "git commit -m <arg>"),
-    ("ssh key path basename", ["ssh", "-i", "~/.ssh/key", "host"], "ssh -i key host"),
+    ("ssh key path basename", ["ssh", "-i", "~/.ssh/key", "host"], "ssh -i <arg> host"),
     ("docker env", ["docker", "run", "--rm", "-e", "TOKEN=abc", "image"],
      "docker run --rm -e <arg> image"),
     ("url with userinfo", ["curl", "https://user:pw@host.example.invalid/x"], "curl <arg>"),
@@ -53,7 +53,7 @@ TABLE = [
     ("aws s3 uri and relative path", ["aws", "s3", "cp", "s3://bucket/key", "./file"],
      "aws s3 cp <arg> file"),
     ("pip requirements", ["pip", "install", "-r", "requirements.txt"],
-     "pip install -r requirements.txt"),
+     "pip install -r <arg>"),
     ("env words stay env", ["FOO=bar", "BAZ=1", "make", "build"], "<env> <env> make build"),
     ("secret flag then value", ["tool", "--token", "abc"], "tool <arg> <arg>"),
     ("secret flag equals", ["tool", "--token=abc"], "tool <arg>"),
@@ -65,9 +65,9 @@ TABLE = [
      "tool -H <arg> <arg> <arg>"),
     ("plain flag", ["tool", "--verbose"], "tool --verbose"),
     ("flag equals value hidden", ["tool", "--level=3"], "tool --level=<arg>"),
-    ("bad flag shape", ["tool", "--bad_flag", "x"], "tool <arg> x"),
+    ("bad flag shape", ["tool", "--bad_flag", "x"], "tool <arg> <arg>"),
     ("overlong flag name", ["tool", "--" + "a" * 40], "tool <arg>"),
-    ("short cluster", ["tool", "-xvf", "a.tar"], "tool -xvf a.tar"),
+    ("short cluster", ["tool", "-xvf", "a.tar"], "tool -xvf <arg>"),
     ("absolute path basename", ["tool", "/etc/hosts"], "tool hosts"),
     ("home path basename", ["tool", "~/x"], "tool x"),
     ("path with space", ["tool", "/home/u/my dir/x"], "tool <arg>"),
@@ -89,12 +89,19 @@ TABLE = [
     ("control char stripped before deciding", ["tool", "a" + BEL + "b"], "tool ab"),
     ("escape sequence stripped", ["tool", ESC + "[31mred"], "tool red"),
     ("zero width stripped", ["tool", "a" + ZW + "b"], "tool ab"),
+    ("flag value hidden", ["tool", "--port", "8080", "status"], "tool --port <arg> status"),
+    ("flag value hidden name", ["tool", "--name", "hunter2"], "tool --name <arg>"),
+    ("flag value hidden user", ["tool", "--user", "bob"], "tool --user <arg>"),
+    ("flag value hidden pwfile", ["tool", "--password-file", "x"], "tool <arg> <arg>"),
+    ("short flag value hidden", ["tool", "-n", "hunter2", "run"], "tool -n <arg> run"),
+    ("node flag then script hidden", ["node", "--inspect", "app.js"], "node --inspect <arg>"),
+    ("python flag then script hidden", ["python", "-u", "script.py", "x"], "python -u <arg> x"),
     ("bare words", ["tool", "status", "run", "tests"], "tool status run tests"),
     ("python module with dots and port", ["python3.11", "-m", "http.server", "8000"],
      "python3.11 -m http.server 8000"),
     ("python bad module", ["python3", "-m", "bad module"], "python3 -m <arg>"),
     ("python script path basename", ["python", "/opt/app/run.py", "--port", "8"],
-     "python run.py --port 8"),
+     "python run.py --port <arg>"),
     ("python relative script basename", ["python", "scripts/run.py"], "python run.py"),
     ("python url as script", ["python", "-u", "https://x.example.invalid/y"],
      "python -u <arg>"),
@@ -146,6 +153,19 @@ def test_secret_named_flag_follower_is_hidden():
     assert safe(["mysql", "-p", "hunter2"]) == "mysql <arg> <arg>"
     assert safe(["tool", "--token", "abc"]) == "tool <arg> <arg>"
     assert safe(["tool", "--auth", "abc", "--client-secret", "def"]) == "tool <arg> <arg> <arg> <arg>"
+
+
+def test_flag_values_are_never_echoed():
+    for flag, val in (("--name", "hunter2"), ("--user", "bob"), ("--password-file", "x"),
+                      ("-n", "hunter2"), ("--port", "8080")):
+        out = safe(["tool", flag, val])
+        assert val not in out, out
+        assert out.split(SP)[-1] == "<arg>"
+
+
+def test_shown_valueless_flag_still_hides_next_word():
+    out = safe(["tool", "--verbose", "hunter2"], show={"--verbose"})
+    assert out == "tool --verbose <arg>"
 
 
 # ---- Explicitly shown arguments keep their allowlist behavior ----
@@ -264,6 +284,21 @@ def test_property_generator_produces_hostile_tokens():
     toks = list(_generated_tokens(4000, seed=68))
     assert sum(1 for t in toks if any(s in t for s in SECRETS)) > 500
     assert any(ESC in t for t in toks)
+
+
+def test_property_token_after_flag_never_echoed():
+    rng = random.Random(681)
+    flags = ["--name", "--user", "-n", "-o", "--port", "--x", "-xvf", "--level", "-H", "--a-b"]
+    words = ["hunter2", "bob", "8080", "status", "x", "alpha-beta", "run", "tests"]
+    for _ in range(3000):
+        flag, word = rng.choice(flags), rng.choice(words) + str(rng.randrange(3))
+        argv = ["tool", "--pre", "pre0", flag, word, "end"]
+        out = safe(argv).split(SP)
+        assert word not in out and "pre0" not in out, out
+        assert out[-1] == "end"
+    # negative case: a flag in value_flags still shows its value
+    vf = frozenset({"--name"})
+    assert safe(["tool", "--name", "alpha"], show={"--name"}, vf=vf) == "tool --name alpha"
 
 
 def test_secret_named_flags_never_shown_by_name_property():

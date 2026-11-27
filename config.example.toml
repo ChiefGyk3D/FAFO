@@ -21,8 +21,10 @@ show_args = ["exec", "resume", "--resume", "--model"]
 # How much of each command line the process view shows.
 #   "allowlist" (default): only the executable and show_args above.
 #   "safe": also short bare words (status, run), flag names, and the base name of a script,
-#           module or path (never its directory). Values after flags, URLs, anything with
-#           @ : = quotes or spaces, and secret-looking words stay hidden.
+#           module or path (never its directory). The word after a flag (its value) stays
+#           hidden unless the flag is in show_args; so do URLs, anything with @ : = quotes
+#           or spaces, and secret-looking words. Residual: a bare word that is a positional
+#           argument and does not follow a flag can still show.
 # Security note: "safe" puts more of each command line on screen, in snapshots and in
 # screenshots, so it is off by default. Anything else is a config error.
 # args_mode = "allowlist"

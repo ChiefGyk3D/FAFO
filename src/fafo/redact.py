@@ -259,6 +259,7 @@ def _safe_tail(
     """Append the safe-mode rendering of items[i:] to out (stops once out exceeds the cap)."""
     n = len(items)
     prev_secret = False  # the previous token was a secret-named flag: this one is its value
+    after_flag = False  # the previous token was a flag: a plain word now is its value
     script_pending = interp is not None  # first non-option argument of an interpreter
     python = interp is not None and interp.startswith("python")
 
@@ -273,9 +274,10 @@ def _safe_tail(
         i += 1
         if tok is None:
             out.append(ARG)
-            prev_secret = False
+            prev_secret = after_flag = False
             continue
         prev, prev_secret = prev_secret, False
+        was_flag, after_flag = after_flag, False
         if tok in shown:
             if tok in valued and i < n and isinstance(items[i], str):
                 nxt = norm(i)
@@ -285,6 +287,7 @@ def _safe_tail(
                     i += 1
                     continue
             out.append(_keep(tok))
+            after_flag = tok.startswith("-")
             continue
         if tok.startswith("-"):
             name, eq, value = tok.partition("=")
@@ -306,6 +309,7 @@ def _safe_tail(
             else:
                 out.append(tok if _flag_ok(tok) else ARG)
                 prev_secret = _secret_name(tok.lstrip("-"))
+                after_flag = True
             continue
         if tok.lower().rstrip(":") in _HEADER_WORDS:
             out.append(ARG)
@@ -315,7 +319,9 @@ def _safe_tail(
             out.append(ARG)
             script_pending = False
             continue
-        if script_pending:
+        if was_flag:  # a value of a flag that is not in value_flags or show_args
+            out.append(ARG)
+        elif script_pending:
             script_pending = False
             out.append(_safe_word(tok, _SCRIPT_WORD, any_path=True))
         else:

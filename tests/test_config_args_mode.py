@@ -71,4 +71,4 @@ def _cmd(source_cls, **kw):
 
 def test_codex_source_output_differs_by_mode():
     assert _cmd(CodexSource) == "codex exec <arg> <arg> <arg>"
-    assert _cmd(CodexSource, args_mode="safe") == "codex exec --flag status run.py"
+    assert _cmd(CodexSource, args_mode="safe") == "codex exec --flag <arg> run.py"

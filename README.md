@@ -85,9 +85,11 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
   configured host names are replaced by aliases.
 - Command lines are shown allowlist-first (`args_mode = "allowlist"`, the default). The opt-in
   `args_mode = "safe"` also shows short bare words, flag names and the base name of a script,
-  module or path, at most 12 tokens, and still hides values, URLs, anything with `@`, `:`,
-  `=`, quotes or spaces, and secret-looking words. Safe mode shows more of each command line on
-  screen, in snapshots and in screenshots, so it is off by default.
+  module or path, at most 12 tokens. It never shows the word after a flag (a flag's value) unless
+  the flag is in `show_args`, and it hides URLs, anything with `@`, `:`, `=`, quotes or spaces,
+  and secret-looking words. A bare word that is a positional argument and does not follow a flag
+  can still show. Safe mode shows more of each command line on screen, in snapshots and in
+  screenshots, so it is off by default.
 - Secrets never go in the config file. A source that needs a token names an environment
   variable (`token_env`); the file is rejected if it contains a secret-looking key.
 - Everything printed passes through control-character stripping, so a hostile process name
