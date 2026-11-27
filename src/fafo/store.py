@@ -12,6 +12,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import get_args
 
+from .jsonsafe import check_finite
 from .model import (
     SNAPSHOT_VERSION,
     Inflight,
@@ -95,28 +96,10 @@ def _str(v):
         raise TypeError("expected str")
 
 
-MAX_DEPTH = 32
-
-
-def _finite_tree(v, depth: int = 0):
-    """Free-form values (host, quota, gpu): no non-finite float anywhere, bounded nesting."""
-    if depth > MAX_DEPTH:
-        raise ValueError("too deeply nested")
-    if isinstance(v, float):
-        if not math.isfinite(v):
-            raise ValueError("non-finite number")
-    elif isinstance(v, dict):
-        for item in v.values():
-            _finite_tree(item, depth + 1)
-    elif isinstance(v, list):
-        for item in v:
-            _finite_tree(item, depth + 1)
-
-
 def _dict(v):
     if type(v) is not dict:
         raise TypeError("expected dict")
-    _finite_tree(v)
+    check_finite(v)
 
 
 def _refuse_constant(name):

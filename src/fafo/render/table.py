@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
-import math
 from dataclasses import asdict, dataclass
 
+from ..jsonsafe import finite_copy
 from ..model import Snapshot
 from .view import (
     Group,
@@ -227,27 +228,25 @@ def format_table(views: Views, width: int = 100) -> str:
     return "\n".join(clip(line, width) for line in lines) + "\n"
 
 
-MAX_JSON_DEPTH = 64
-
-
-def scrub_nonfinite(value, depth: int = 0):
-    """Copy of value with every NaN or infinity replaced by None (strict JSON has neither).
-
-    Containers nested deeper than MAX_JSON_DEPTH become None rather than raising.
-    """
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if depth >= MAX_JSON_DEPTH and isinstance(value, (dict, list, tuple)):
-        return None
-    if isinstance(value, dict):
-        return {k: scrub_nonfinite(v, depth + 1) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [scrub_nonfinite(v, depth + 1) for v in value]
-    return value
-
-
 def _dump(doc) -> str:
-    return json.dumps(scrub_nonfinite(doc), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    return json.dumps(finite_copy(doc), indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
+def _snapshot_doc(snap: Snapshot) -> dict:
+    """Snapshot as plain dicts. asdict only sees the fixed-shape rows; the free-form host,
+    quota and gpu values (untrusted nesting) are copied by the iterative finite_copy instead."""
+    shell = dataclasses.replace(
+        snap,
+        host={},
+        quota={},
+        llm=None if snap.llm is None else dataclasses.replace(snap.llm, gpu={}),
+    )
+    doc = asdict(shell)
+    doc["host"] = finite_copy(snap.host)
+    doc["quota"] = finite_copy(snap.quota)
+    if snap.llm is not None:
+        doc["llm"]["gpu"] = finite_copy(snap.llm.gpu)
+    return doc
 
 
 def format_json(snap: Snapshot | None, now: float) -> str:
@@ -255,7 +254,7 @@ def format_json(snap: Snapshot | None, now: float) -> str:
     status, age = snapshot_status(snap, now)
     if snap is None:
         return _dump({"status": status})
-    doc = asdict(snap)
+    doc = _snapshot_doc(snap)
     doc["status"] = status
     doc["age_s"] = age
     return _dump(doc)
