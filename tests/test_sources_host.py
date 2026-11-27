@@ -13,6 +13,7 @@ from collections import namedtuple
 from pathlib import Path
 
 from conftest import wait_gone
+
 from fafo.config import SourceCfg
 from fafo.source import Ctx
 from fafo.sources.host import MAX_ITEMS, HostSource

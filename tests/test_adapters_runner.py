@@ -7,6 +7,7 @@ import threading
 import time
 
 from conftest import wait_gone
+
 from fafo.adapters.safo import MAX_OUTPUT, SafoAdapter
 
 GOOD = '{"sessions": [{"session_id": "s1", "issue": "o/r#1"}]}'

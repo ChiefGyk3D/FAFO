@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 import pytest
-
 from conftest import pid_alive
+
 from fafo import attribution
 from fafo.attribution import SubprocessGit, attribute
 

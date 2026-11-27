@@ -11,8 +11,8 @@ import time
 from pathlib import Path
 
 import pytest
-
 from conftest import wait_gone
+
 from fafo.sshro import OPS, SshError, SshHost, build_argv, default_runner, ssh_ro
 
 HOST = SshHost(alias="runner-a", key_path="/keys/id_runner", user="ci")
