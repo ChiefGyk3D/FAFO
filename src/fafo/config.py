@@ -89,12 +89,14 @@ def _path_ok(value: object) -> bool:
 
 
 # The only secret-word keys that are allowed, by exact location. Each holds a NAME or a path,
-# never a secret, and its value is checked here, before anything else sees the file.
-_ALLOWED_SECRET_KEYS = {
-    "sources.runners.token_env": (_env_name_ok, "an environment variable NAME such as GITHUB_TOKEN"),
-    "sources.copilot.token_env": (_env_name_ok, "an environment variable NAME such as GITHUB_TOKEN"),
-    "sources.runners.hosts.key_path": (_path_ok, "a plain file path (never key contents)"),
-}
+# never a secret; _parse_options validates the value (_env_name_ok, _path_ok) for every one.
+_ALLOWED_SECRET_KEYS = frozenset(
+    {
+        "sources.runners.token_env",
+        "sources.copilot.token_env",
+        "sources.runners.hosts.key_path",
+    }
+)
 
 
 def _check_secrets(data: dict, where: str = "", word_split: bool = False) -> None:
@@ -105,16 +107,11 @@ def _check_secrets(data: dict, where: str = "", word_split: bool = False) -> Non
             hit = any(w in SECRET_WORDS for w in re.split(r"[^a-z0-9]+", low))
         else:
             hit = any(w in low for w in SECRET_WORDS)
-        if hit:
-            allowed = _ALLOWED_SECRET_KEYS.get(f"{where}{k}")
-            if allowed is None:
-                raise ConfigError(
-                    f"secret-looking key '{where}{k}' in config file: secrets come from "
-                    "environment variables, never the config file"
-                )
-            ok, what = allowed
-            if not ok(v):
-                raise ConfigError(f"'{where}{k}' must be {what}; the value is not accepted")
+        if hit and f"{where}{k}" not in _ALLOWED_SECRET_KEYS:
+            raise ConfigError(
+                f"secret-looking key '{where}{k}' in config file: secrets come from "
+                "environment variables, never the config file"
+            )
         if isinstance(v, dict):
             _check_secrets(v, f"{where}{k}.", word_split or k == "aliases")
         elif isinstance(v, list):
