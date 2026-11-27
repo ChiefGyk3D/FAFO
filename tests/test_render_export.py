@@ -226,9 +226,79 @@ def test_trimmed_case_keeps_index_intact(tmp_path):
     assert [x["pid"] for x in doc["session_index"]] == list(range(1, 301))
 
 
-def test_session_trim_keeps_index(monkeypatch):
+def test_session_trim_keeps_index_when_sessions_alone_suffice(monkeypatch):
     s = big_snapshot(50)
     monkeypatch.setattr(export, "MAX_BYTES", 12000)
     doc = json.loads(export.encode_bounded(views_to_dict(build_views(s, NOW), snapshot=s)))
-    assert len(doc["session_index"]) == 50
+    assert len(doc["session_index"]) == 50 and doc["session_index_truncated"] is False
+    assert doc["session_index_count"] == 50 and doc["index_hidden"] == 0
     assert len(doc["sessions"]) < 50 and doc["sessions_hidden"] == 50 - len(doc["sessions"])
+
+
+def test_index_truncated_from_the_end_with_counts(monkeypatch):
+    s = big_snapshot(120)
+    monkeypatch.setattr(export, "MAX_BYTES", 3000)
+    raw = export.encode_bounded(views_to_dict(build_views(s, NOW), snapshot=s, generated=NOW))
+    assert len(raw) <= 3000
+    doc = json.loads(raw)
+    n = len(doc["session_index"])
+    assert 0 < n < 120
+    assert [x["pid"] for x in doc["session_index"]] == list(range(1, n + 1))
+    assert doc["session_index_count"] == 120 and doc["index_hidden"] == 120 - n
+    assert doc["session_index_truncated"] is True
+
+
+def test_index_counts_when_over_the_entry_cap():
+    s = big_snapshot(2100)
+    doc = views_to_dict(build_views(s, NOW), snapshot=s, generated=NOW)
+    assert len(doc["session_index"]) == 2000 and doc["session_index_count"] == 2100
+    assert doc["index_hidden"] == 100 and doc["session_index_truncated"] is True
+
+
+def test_index_field_caps():
+    s = big_snapshot(1)
+    x = s.sessions[0]
+    x.session_id, x.name, x.address = "i" * 500, "n" * 500, "a" * 500
+    x.project, x.state = Stamped("p" * 500, NOW), "s" * 500
+    e = views_to_dict(build_views(s, NOW), snapshot=s)["session_index"][0]
+    assert (len(e["name"]), len(e["project"]), len(e["state"])) == (48, 48, 16)
+    assert len(e["session_id"]) == 128 and len(e["address"]) == 128
+
+
+def test_worst_case_input_always_fits_the_bound(tmp_path):
+    wide = chr(0x4E2D)  # 6 bytes escaped
+    astral = chr(0x1F600)  # 12 bytes escaped
+    text = (wide + astral) * 100
+    sessions = [
+        Session(
+            pid=i + 1, agent="claude", session_id=text, project=Stamped(text, NOW),
+            project_rule=text, task=text, state=text, branch=text, worktree=text,
+            started=NOW - 5, cpu=1.0, rss=1, name=text, address=text,
+        )
+        for i in range(2000)
+    ]
+    procs = [
+        Proc(100000 + s * 1000 + c, s + 1, s + 1, text, text, 0.5, 2048, NOW - 10)
+        for s in range(200)
+        for c in range(256)
+    ] + [Proc(900000 + i, 1, None, "codex", text, 0.5, 1, NOW) for i in range(600)]
+    snap_ = Snapshot(version=SNAPSHOT_VERSION, taken=NOW, host={}, sessions=sessions, procs=procs)
+    views = build_views(snap_, NOW)
+    path = tmp_path / "views.json"
+    write_views(path, views, snapshot=snap_, generated=NOW)
+    raw = path.read_bytes()
+    assert len(raw) <= export.MAX_BYTES < 4 * 1024 * 1024
+    doc = json.loads(raw)
+    assert doc["session_index_count"] == 2000
+    assert doc["session_index_truncated"] is True and doc["index_hidden"] > 0
+    assert doc["index_hidden"] == 2000 - len(doc["session_index"])
+    assert 0 < len(doc["session_index"]) < 2000  # trimmed, not dropped by the minimal fallback
+
+
+def test_minimal_fallback_when_nothing_else_fits(monkeypatch):
+    s = big_snapshot(3)
+    monkeypatch.setattr(export, "MAX_BYTES", 400)
+    raw = export.encode_bounded(views_to_dict(build_views(s, NOW), snapshot=s, generated=NOW))
+    doc = json.loads(raw)
+    assert doc["schema"] == 2 and doc["session_index"] == [] and doc["session_index_count"] == 3
+    assert doc["session_index_truncated"] is True

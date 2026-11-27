@@ -11,8 +11,17 @@ The pane learns its own session id from the mod API and marks the matching row i
 The display cap in build_views hides sessions beyond MAX_SESSIONS, so `sessions` can lack the
 pane's own session. Schema 2 adds `session_index`: a compact list of EVERY known Claude session
 (not Copilot cloud rows), ordered by pid, at most 2000 entries. The pane finds its session in
-session_index, then in sessions if present. The index is the last thing trimmed: size trimming
-drops children, then whole sessions, and leaves the index alone.
+session_index, then in sessions if present. Three more top-level keys let the pane tell a
+missing session from a hidden one: `session_index_count` (the true number of Claude sessions),
+`index_hidden` (int, count minus len(session_index)) and `session_index_truncated` (bool,
+index_hidden > 0). Schema stays 2: these keys are additions, nothing was removed or retyped.
+
+SIZE RULE: the file ALWAYS fits MAX_BYTES (2 MiB), measured on the encoded bytes. The file is
+encoded with ensure_ascii=True, so it is pure ASCII and bytes equal characters, a non-ASCII
+character costs 6 bytes (12 for a character outside the BMP) and the measurement counts that.
+When over the bound, trim in this order: children per session to 20, children to 0, display
+sessions, unattached group rows, runners, and as the LAST resort entries from the END of the
+pid-sorted index. If even that cannot fit, a minimal document with empty lists is written.
 
 All strings come out of build_views already sanitized; json.dumps with ensure_ascii escapes
 anything that is left, so the encoded file never holds a raw control character.
@@ -30,10 +39,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ..model import Snapshot
-from .view import _CAP_ID, _CAP_NAME, _CAP_PROJECT, _CAP_SHORT, Views, _s
+from .view import Views, _s
 
 SCHEMA_VERSION = 2
 MAX_INDEX = 2000
+_IDX_NAME = 48
+_IDX_PROJECT = 48
+_IDX_STATE = 16
+_IDX_ID = 128
 MAX_BYTES = 2 * 1024 * 1024  # well under the 4 MiB the mod runtime can read
 _TRIM_STEPS = (20, 0)  # children kept per session, tried in order when the file is too big
 
@@ -44,17 +57,17 @@ def _finite(v: float | None) -> float | None:
 
 def _index_entry(session_id, name, pid, project, state, address) -> dict:
     return {
-        "session_id": _s(session_id, _CAP_ID),
-        "name": _s(name, _CAP_NAME),
+        "session_id": _s(session_id, _IDX_ID),
+        "name": _s(name, _IDX_NAME),
         "pid": pid,
-        "project": _s(project, _CAP_PROJECT),
-        "state": _s(state, _CAP_SHORT),
-        "address": _s(address or session_id, _CAP_ID),
+        "project": _s(project, _IDX_PROJECT),
+        "state": _s(state, _IDX_STATE),
+        "address": _s(address or session_id, _IDX_ID),
     }
 
 
-def build_session_index(views: Views, snapshot: Snapshot | None) -> list[dict]:
-    """Every known Claude session, by pid, capped at MAX_INDEX. Uses the snapshot when given
+def build_session_index(views: Views, snapshot: Snapshot | None) -> tuple[list[dict], int]:
+    """(entries by pid capped at MAX_INDEX, true count of Claude sessions). Uses the snapshot when given
     (the view model hides sessions past its display cap); else the sessions the view shows."""
     if snapshot is not None:
         rows = [
@@ -69,7 +82,7 @@ def build_session_index(views: Views, snapshot: Snapshot | None) -> list[dict]:
             if n.agent == "claude"
         ]
     rows.sort(key=lambda r: r["pid"])
-    return rows[:MAX_INDEX]
+    return rows[:MAX_INDEX], len(rows)
 
 
 def views_to_dict(
@@ -85,10 +98,14 @@ def views_to_dict(
         for node in group["sessions"]:
             node["is_current"] = False
     gen = _finite(time.time() if generated is None else generated)
+    index, count = build_session_index(views, snapshot)
     return {
         "schema": SCHEMA_VERSION,
         "generated": gen,
-        "session_index": build_session_index(views, snapshot),
+        "session_index": index,
+        "session_index_count": count,
+        "index_hidden": count - len(index),
+        "session_index_truncated": count > len(index),
         **doc,
     }
 
@@ -105,21 +122,70 @@ def _trim(doc: dict, keep: int) -> None:
             del node["children"][keep:]
 
 
+def _halve(rows: list, hidden_owner: dict | None, hidden_key: str) -> None:
+    cut = len(rows) // 2
+    if hidden_owner is not None:
+        hidden_owner[hidden_key] += len(rows) - cut
+    del rows[cut:]
+
+
+def _shrink_once(doc: dict) -> bool:
+    """Halve the next non-empty display part. False when only the index is left to trim."""
+    if doc["sessions"]:
+        _halve(doc["sessions"], doc, "sessions_hidden")
+        return True
+    for g in doc["unattached"]:
+        if g["procs"] or g["sessions"]:
+            _halve(g["procs"], g, "hidden")
+            _halve(g["sessions"], g, "hidden")
+            return True
+    if doc["runners"]:
+        _halve(doc["runners"], doc, "runners_hidden")
+        return True
+    return False
+
+
+def _set_index(doc: dict, full: list, k: int) -> None:
+    doc["session_index"] = full[:k]
+    doc["index_hidden"] = doc["session_index_count"] - k
+    doc["session_index_truncated"] = doc["index_hidden"] > 0
+
+
 def encode_bounded(doc: dict) -> bytes:
-    """Encode, trimming until under MAX_BYTES: children (20, then 0), then whole sessions
-    (halving). session_index is never trimmed here; it is capped at MAX_INDEX when built."""
+    """Encode to at most MAX_BYTES bytes, trimming in the order the module docstring states."""
     payload = _encode(doc)
     for keep in _TRIM_STEPS:
         if len(payload) <= MAX_BYTES:
             return payload
         _trim(doc, keep)
         payload = _encode(doc)
-    while len(payload) > MAX_BYTES and doc["sessions"]:
-        cut = len(doc["sessions"]) // 2
-        doc["sessions_hidden"] += len(doc["sessions"]) - cut
-        del doc["sessions"][cut:]
+    while len(payload) > MAX_BYTES and _shrink_once(doc):
         payload = _encode(doc)
-    return payload
+    if len(payload) <= MAX_BYTES:
+        return payload
+    full = doc["session_index"]  # last resort: drop index entries from the end (bisect)
+    lo, hi = 0, len(full)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        _set_index(doc, full, mid)
+        if len(_encode(doc)) <= MAX_BYTES:
+            lo = mid
+        else:
+            hi = mid - 1
+    _set_index(doc, full, lo)
+    payload = _encode(doc)
+    if len(payload) <= MAX_BYTES:
+        return payload
+    minimal = {
+        k: doc[k]
+        for k in ("schema", "generated", "status", "age_s", "message", "session_index_count")
+    }
+    minimal.update(
+        session_index=[], index_hidden=doc["session_index_count"], session_index_truncated=True,
+        banner=None, health=[], host={}, sessions=[], sessions_hidden=0, unattached=[],
+        llm=None, runners=[], runners_hidden=0, quota=[],
+    )
+    return _encode(minimal)
 
 
 def write_views(
