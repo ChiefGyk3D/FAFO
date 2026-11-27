@@ -12,7 +12,7 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
-from conftest import wait_gone
+from conftest import deadline_bound, wait_for_file, wait_gone
 
 from fafo.config import SourceCfg
 from fafo.source import Ctx
@@ -149,7 +149,7 @@ def test_nvidia_failure_exit_ignored(tmp_path):
 def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
     pidfile = tmp_path / "pid"
     exe = write_script(tmp_path, f"sh -c 'echo $$ > {pidfile}; exec sleep 30' &\nwait")
-    src = make_src(nvidia_smi=exe, gpu_timeout_s=0.5)
+    src = make_src(nvidia_smi=exe, gpu_timeout_s=3.0)
     box: dict = {}
 
     def run():
@@ -158,12 +158,14 @@ def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
     t0 = time.monotonic()
     th = threading.Thread(target=run, daemon=True)
     th.start()
-    th.join(10)  # guard: a missing deadline fails here instead of hanging the suite
+    th.join(15)  # guard: a missing deadline fails here instead of hanging the suite
     alive = th.is_alive()
-    pid = int(pidfile.read_text()) if pidfile.exists() else None
+    elapsed = time.monotonic() - t0
+    pid = int(pidfile.read_text()) if pidfile.exists() and pidfile.read_text().strip() else None
     try:
         assert not alive, "collect hung past the deadline"
-        assert time.monotonic() - t0 < 5
+        assert elapsed < deadline_bound(3.0)
+        pid = int(wait_for_file(pidfile))
         assert "gpus" not in box["res"].host
         assert box["res"].host["load1"] == 0.5
         if pid is not None and wait_gone([pid]):
@@ -175,6 +177,16 @@ def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
                 os.kill(pid, 9)
             except ProcessLookupError:
                 pass
+
+
+def test_nvidia_deadline_is_accurate(tmp_path):
+    """The one tight timing test: a trivial child, deadline <= elapsed < deadline + slack."""
+    exe = write_script(tmp_path, "exec sleep 30")
+    src = make_src(nvidia_smi=exe, gpu_timeout_s=1.0)
+    t0 = time.monotonic()
+    res = src.collect(make_ctx())
+    assert 1.0 <= time.monotonic() - t0 < deadline_bound(1.0)
+    assert "gpus" not in res.host
 
 
 def test_one_metric_failing_drops_only_that_metric():
@@ -255,7 +267,7 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
     from fafo.sources.host import _MIN_ENV, _run_capped
 
     exe = write_script(tmp_path, "echo '0, n, 1, 2, 3'")
-    assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
+    assert b"0, n" in _run_capped([exe], 10.0, _MIN_ENV)
     kills = group_kill_spy.kills()
     assert len(kills) == 1
     assert group_kill_spy.events[0] == kills[0]  # no wait before the kill
@@ -269,8 +281,8 @@ def test_normal_exit_leaves_no_grandchild(tmp_path):
     exe = write_script(
         tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho '0, n, 1, 2, 3'"
     )
-    assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
-    pid = int(pidfile.read_text())
+    assert b"0, n" in _run_capped([exe], 10.0, _MIN_ENV)
+    pid = int(wait_for_file(pidfile))
     if wait_gone([pid]):
         return
     os.kill(pid, 9)

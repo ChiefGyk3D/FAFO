@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import wait_gone
+from conftest import deadline_bound, wait_for_file, wait_gone
 
 from fafo import attribution
 from fafo.attribution import SubprocessGit, attribute
@@ -166,8 +166,8 @@ def test_git_timeout_returns_fallback_quickly(tmp_path: Path):
     fake_git.chmod(0o700)
     runner = SubprocessGit(git_bin=str(fake_git))
     start = time.monotonic()
-    assert runner.run(["rev-parse", "--show-toplevel"], str(d), 0.3) is None
-    assert time.monotonic() - start < 3
+    assert runner.run(["rev-parse", "--show-toplevel"], str(d), 1.0) is None
+    assert 1.0 <= time.monotonic() - start < deadline_bound(1.0)
     assert attribute(str(d), [], git=runner) == ("slow", "cwd-name")
 
 
@@ -269,8 +269,8 @@ def test_timeout_kills_whole_process_group(tmp_path: Path):
     script = tmp_path / "grouplaunch"
     script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nsleep 30\n")
     script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 0.5) is None
-    child = int(pidfile.read_text())
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3.0) is None
+    child = int(wait_for_file(pidfile))
     assert wait_gone([child]), "grandchild survived the group kill"
 
 
@@ -284,8 +284,8 @@ def test_oversize_kills_whole_process_group(tmp_path: Path):
         "head -c 5000 /dev/zero | tr '\\0' a\nsleep 30\n"
     )
     script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 5) is None
-    child = int(pidfile.read_text())
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 10) is None
+    child = int(wait_for_file(pidfile))
     assert wait_gone([child]), "grandchild survived the group kill"
 
 
@@ -305,7 +305,7 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path: Path, group_kill_spy
     script = tmp_path / "fastgit"
     script.write_text("#!/bin/sh\necho hello\n")
     script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 10) == "hello"
     kills = group_kill_spy.kills()
     assert len(kills) == 1
     assert group_kill_spy.events[0] == kills[0]  # no wait before the kill
@@ -321,6 +321,6 @@ def test_normal_exit_leaves_no_grandchild(tmp_path: Path):
         f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho hello\n"
     )
     script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
-    child = int(pidfile.read_text())
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 10) == "hello"
+    child = int(wait_for_file(pidfile))
     assert wait_gone([child]), "grandchild survived the group kill"

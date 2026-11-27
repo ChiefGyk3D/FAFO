@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import wait_gone
+from conftest import deadline_bound, wait_for_file, wait_gone
 
 from fafo.sshro import OPS, SshError, SshHost, build_argv, default_runner, ssh_ro
 
@@ -142,7 +142,7 @@ def test_hung_child_cut_by_deadline_and_group_killed(tmp_path):
     def target():
         t0 = time.monotonic()
         try:
-            ssh_ro(HOST, "loadavg", timeout_s=0.7, runner=runner)
+            ssh_ro(HOST, "loadavg", timeout_s=3.0, runner=runner)
         except SshError as exc:
             result["err"] = exc
         result["elapsed"] = time.monotonic() - t0
@@ -151,11 +151,20 @@ def test_hung_child_cut_by_deadline_and_group_killed(tmp_path):
     th.start()
     th.join(8)
     assert not th.is_alive(), "ssh deadline did not fire"
-    assert "err" in result and result["elapsed"] < 5
-    pid = int(pidfile.read_text())
+    assert "err" in result and result["elapsed"] < deadline_bound(3.0)
+    pid = int(wait_for_file(pidfile))
     if not wait_gone([pid]):
         os.kill(pid, 9)
         pytest.fail("child process survived the group kill")
+
+
+def test_deadline_is_accurate(tmp_path):
+    """The one tight timing test: a trivial child, deadline <= elapsed < deadline + slack."""
+    script = _script(tmp_path, "exec sleep 30\n")
+    t0 = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        default_runner([str(script)], 1.0, ENV)
+    assert 1.0 <= time.monotonic() - t0 < deadline_bound(1.0)
 
 
 def test_default_runner_returns_exit_code_and_output(tmp_path):
@@ -196,8 +205,8 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
 def test_normal_exit_kills_grandchild_left_behind(tmp_path):
     pidfile = tmp_path / "gc.pid"
     script = _script(tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho done\n")
-    assert default_runner([str(script)], 5.0, ENV) == (0, b"done\n")
-    pid = int(pidfile.read_text())
+    assert default_runner([str(script)], 10.0, ENV) == (0, b"done\n")
+    pid = int(wait_for_file(pidfile))
     if not wait_gone([pid]):
         os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild outlived a normally exited child")
@@ -208,11 +217,11 @@ def test_hung_child_and_grandchild_killed_within_deadline(tmp_path, group_kill_s
     script = _script(tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n")
     t0 = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        default_runner([str(script)], 0.5, ENV)
-    assert time.monotonic() - t0 < 5
+        default_runner([str(script)], 3.0, ENV)
+    assert time.monotonic() - t0 < deadline_bound(3.0)
     assert len(group_kill_spy.kills()) >= 1
     assert group_kill_spy.reaped_when_killed == []
-    pid = int(pidfile.read_text())
+    pid = int(wait_for_file(pidfile))
     if not wait_gone([pid]):
         os.kill(pid, signal.SIGKILL)
         pytest.fail("grandchild survived the deadline kill")

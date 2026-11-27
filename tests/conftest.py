@@ -75,3 +75,44 @@ def wait_gone(pids, limit: float = 5.0) -> bool:
         if time.monotonic() >= end:
             return False
         time.sleep(0.02)
+
+
+def deadline_bound(deadline: float) -> float:
+    """Upper bound for a measured runner call: the deadline plus 20 percent plus 2 s of slack.
+
+    Used only on the elapsed time of the runner call itself, never on child start-up.
+    """
+    return deadline * 1.2 + 2.0
+
+
+def wait_group_gone(pgid: int, limit: float = 5.0) -> bool:
+    """Poll until killpg(pgid, 0) reports no member left (a zombie member still counts)."""
+    end = time.monotonic() + limit
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.02)
+
+
+def wait_for_file(path, timeout: float = 10.0) -> str:
+    """Poll up to `timeout` seconds for a non-empty, newline-terminated file; return its text.
+
+    A child records its pid(s) with one `echo`, so a complete line means the write finished.
+    Fails the test with a clear message when the file never appears (the child never started).
+    """
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except FileNotFoundError:
+            text = ""
+        if text.endswith("\n"):
+            return text
+        if time.monotonic() >= end:
+            pytest.fail(f"{path} not written within {timeout}s (child never recorded its pid)")
+        time.sleep(0.02)
