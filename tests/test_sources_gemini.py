@@ -1,6 +1,6 @@
 import logging
 
-from sources_test_codex import FakeProc
+from test_sources_codex import FakeProc
 
 from fafo.config import SourceCfg
 from fafo.source import Ctx
