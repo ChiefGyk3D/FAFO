@@ -235,6 +235,6 @@ def test_oversized_fake_output_is_not_trusted(tmp_path: Path):
     d = tmp_path / "w"
     d.mkdir()
     git = FakeGit({("rev-parse", str(d)): "/" + "a" * 5000, ("config", str(d)): "b" * 5000})
-    project, rule = attribute(str(d), [], git=git)
+    project, _rule = attribute(str(d), [], git=git)
     assert len(project) <= 100
     assert "b" * 200 not in project
