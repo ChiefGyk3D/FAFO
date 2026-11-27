@@ -34,6 +34,8 @@ class Session:
     started: float
     cpu: float
     rss: int
+    name: str = ""
+    address: str = ""  # full session id, for manual cross-session messaging
 
 
 @dataclass
