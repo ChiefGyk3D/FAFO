@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, fields
@@ -26,6 +27,21 @@ from .model import (
 )
 
 
+def _ensure_dir(directory: Path) -> None:
+    """Create missing directories as 0700. An existing directory is never chmodded."""
+    missing: list[Path] = []
+    cur = directory
+    while not cur.exists() and cur != cur.parent:
+        missing.append(cur)
+        cur = cur.parent
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, stat.S_IRWXU)
+        except FileExistsError:
+            continue  # someone else created it: not ours to chmod
+        os.chmod(d, stat.S_IRWXU)
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -34,11 +50,12 @@ def write_snapshot(
     _before_replace is a test seam called after the temp file is complete and before the rename.
     """
     path = Path(path)
+    _ensure_dir(path.parent)
     payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
-            os.fchmod(fh.fileno(), 0o600)
+            os.fchmod(fh.fileno(), stat.S_IRUSR | stat.S_IWUSR)
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
