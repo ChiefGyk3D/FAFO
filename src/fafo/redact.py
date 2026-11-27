@@ -203,6 +203,7 @@ _PATH_CHARS = re.compile(r"^[A-Za-z0-9_.+/~-]+$")
 _EMBEDDED_PREFIX = re.compile(
     r"(?i)(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|akia|aiza|eyj)[A-Za-z0-9_-]{10,}"
 )
+_SWITCH_LETTERS = frozenset("vxlarfhqstzind")
 _CODE_CLUSTER = re.compile(r"^(-[abdf-zA-Z]{0,4}[ce])")
 _HEADER_WORDS = frozenset({"bearer", "basic", "authorization"})
 _SINGLE_DASH_MAX = 5  # letters after a single dash; longer is likely an option with a glued value
@@ -223,6 +224,9 @@ def _flag_ok(name: str) -> bool:
         if len(name) - 1 > _SINGLE_DASH_MAX:
             return False
         if len(name) > 2 and name[1] in "pP":  # -psecret: a glued password
+            return False
+        # -mfoo, -uroot: a letter outside the combinable switches may start an attached value.
+        if any(c not in _SWITCH_LETTERS for c in name[2:]):
             return False
     return not _secret_name(name.lstrip("-")) and not _secretish(name)
 
@@ -246,17 +250,16 @@ def _code_flag(tok: str) -> str | None:
     """The displayable part of an interpreter code flag, or None when tok is not one.
 
     -E and --eval show as they are. A single-dash cluster is a code flag when a c or e
-    comes within its first five letters; only the letters up to and including that first
-    c or e are returned (a validated flag), never an attached argument ("-cpass" gives
-    "-c"). A prefix that is not a displayable flag gives ARG.
+    comes within its first five letters; only the canonical "-c" or "-e" is returned,
+    never the letters before it (they can be an attached option value) or after it
+    ("-lcpass" gives "-c").
     """
     if tok in ("--eval", "-E"):
         return tok
     m = _CODE_CLUSTER.match(tok)
     if not m:
         return None
-    prefix = m.group(1)
-    return prefix if _flag_ok(prefix) else ARG
+    return "-" + m.group(1)[-1]  # only the canonical -c or -e, never letters before it
 
 
 def _safe_tail(

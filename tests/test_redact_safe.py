@@ -39,7 +39,7 @@ TABLE = [
     ("node script", ["node", "app.js"], "node app.js"),
     ("bash -c shows only script", ["bash", "-c", 'curl -H "Authorization: Bearer x" url'],
      "bash -c <script>"),
-    ("bash -lc cluster", ["/bin/bash", "-lc", "echo hi"], "bash -lc <script>"),
+    ("bash -lc cluster", ["/bin/bash", "-lc", "echo hi"], "bash -c <script>"),
     ("bash -c hides trailing args", ["bash", "-c", "x", "status", "y"], "bash -c <script>"),
     ("node -e", ["node", "-e", "console.log(1)"], "node -e <script>"),
     ("git commit message", ["git", "commit", "-m", "message with secret"], "git commit -m <arg>"),
@@ -96,9 +96,14 @@ TABLE = [
     ("short flag value hidden", ["tool", "-n", "hunter2", "run"], "tool -n <arg> run"),
     ("node flag then script hidden", ["node", "--inspect", "app.js"], "node --inspect <arg>"),
     ("python flag then script hidden", ["python", "-u", "script.py", "x"], "python -u <arg> x"),
+    ("python -oefoo attached value", ["python", "-Wecfoo"], "python -e <script>"),
+    ("combinable cluster shown", ["ls", "-la"], "ls -la"),
+    ("attached value -mfoo", ["tool", "-mfoo"], "tool <arg>"),
+    ("attached value -uroot", ["tool", "-uroot"], "tool <arg>"),
+    ("uppercase after first", ["tool", "-xV"], "tool <arg>"),
     ("bash -cpass attached", ["bash", "-cpass"], "bash -c <script>"),
     ("python -efoo attached", ["python", "-efoo"], "python -e <script>"),
-    ("bash -lcpass attached", ["bash", "-lcpass"], "bash -lc <script>"),
+    ("bash -lcpass attached", ["bash", "-lcpass"], "bash -c <script>"),
     ("node -eXYZ attached", ["node", "-eXYZ"], "node -e <script>"),
     ("python -ec cluster", ["python3", "-ec", "x"], "python3 -e <script>"),
     ("attached secret tail", ["sh", "-cghp_abcdefghijklmnop"], "sh -c <script>"),
@@ -193,9 +198,31 @@ def test_attached_code_flag_tail_is_never_shown_property():
         for exe in ("bash", "python3", "node", "sh"):
             out = safe([exe, tok, "next"])
             count += 1
-            assert out == f"{exe} -{pre}{code} <script>", (tok, out)
+            assert out == f"{exe} -{code} <script>", (tok, out)
             assert tail not in out.split(SP)[1:] and "next" not in out
     assert count == 12000
+
+
+def test_attached_short_value_is_never_echoed_property():
+    rng = random.Random(684)
+    switches = "vxlarfhqstzind"
+    others = "bcjkmopuwyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789e"
+    count = 0
+    for _ in range(3000):
+        first = rng.choice("pxmuoHWvl")
+        rest = [rng.choice(switches) for _ in range(rng.randrange(1, 4))]
+        bad = rng.choice(others)
+        rest.insert(rng.randrange(len(rest) + 1), bad)
+        tok = "-" + first + "".join(rest)
+        if len(tok) - 1 > 5:
+            continue
+        count += 1
+        assert safe(["tool", tok, "status"]) == "tool <arg> <arg>", tok
+    assert count > 2000
+    # positive control: all-switch clusters up to five letters are shown
+    for _ in range(300):
+        tok = "-x" + "".join(rng.choice(switches) for _ in range(rng.randrange(1, 4)))
+        assert safe(["tool", tok]) == "tool " + tok, tok
 
 
 def test_code_flag_guard_bites_on_non_interpreters():
