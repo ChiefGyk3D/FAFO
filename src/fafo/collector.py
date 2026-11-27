@@ -20,6 +20,8 @@ from .config import Config, SourceCfg
 from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
 from .redact import mask_credentials, sanitize_text
 from .source import Ctx, Source, SourceResult
+from .render.export import write_views
+from .render.view import build_views
 from .store import write_snapshot
 
 BACKOFF_CAP_S = 60.0
@@ -95,9 +97,15 @@ class Collector:
         *,
         clock: Callable[[], float] = time.time,
         tick_s: float | None = None,
+        views_path: Path | None = None,
+        write_views_file: bool = True,
     ) -> None:
         self._cfg = cfg
         self._store_path = Path(store_path)
+        self._views_path = (
+            Path(views_path) if views_path is not None else self._store_path.with_name("views.json")
+        )
+        self._write_views_file = write_views_file
         self._clock = clock
         self._stop = threading.Event()
         self._states: list[_State] = []
@@ -209,11 +217,24 @@ class Collector:
             self._threads.append(t)
             t.start()
         while not self._stop.is_set():
+            snap: Snapshot | None = None
             try:
-                write_snapshot(self._store_path, self.snapshot())
+                snap = self.snapshot()
+                write_snapshot(self._store_path, snap)
             except Exception:  # noqa: BLE001 - a failed write must not end the collector
+                snap = None
                 _log.exception("snapshot write failed")
+            if snap is not None and self._write_views_file:
+                self._write_views(snap)
             self._stop.wait(self._tick_s)
+
+    def _write_views(self, snap: Snapshot) -> None:
+        """Write views.json from the snapshot just written. Never raises; logs no values."""
+        try:
+            now = self._clock()
+            write_views(self._views_path, build_views(snap, now), generated=now)
+        except Exception as exc:  # noqa: BLE001 - views are optional, the snapshot is not
+            _log.warning("views.json write failed: %s", type(exc).__name__)
 
     def stop(self) -> None:
         """Ask everything to end. Never joins a worker, so a hung source cannot block it."""
