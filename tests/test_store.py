@@ -415,3 +415,60 @@ def test_write_nonfinite_keeps_mode_and_leaves_no_temp_files(tmp_path: Path):
     write_snapshot(path, snap)
     assert stat.S_IMODE(path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
     assert [p.name for p in tmp_path.iterdir()] == ["snap.json"]
+
+
+def test_write_huge_ints_become_null_and_boundary_kept(tmp_path: Path):
+    snap = make_snapshot()
+    snap.host = {
+        "a": {"big": 10**5000, "neg": -(10**5000), "max": 2**63 - 1, "over": 2**63},
+        "l": [10**5000],
+    }
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # must not raise
+    back = read_snapshot(path)
+    assert back is not None
+    assert back.host["a"] == {"big": None, "neg": None, "max": 2**63 - 1, "over": None}
+    assert back.host["l"] == [None]
+
+
+def test_reader_refuses_wide_ints_consistently(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, make_snapshot())
+    text = path.read_text().replace('"load":4.1', '"load":' + str(2**63))
+    path.write_text(text)
+    assert read_snapshot(path) is None
+    path.write_text(text.replace(str(2**63), str(2**63 - 1)))
+    assert read_snapshot(path) is not None
+
+
+class _TripList(list):
+    """List whose iteration raises if more than LIMIT elements are pulled."""
+
+    LIMIT = 100_001
+
+    def __iter__(self):
+        for i in range(10**9):
+            if i > self.LIMIT:
+                raise AssertionError("iterated past the cap")
+            yield i
+
+
+class _TripDict(dict):
+    def items(self):
+        for i in range(10**9):
+            if i > _TripList.LIMIT:
+                raise AssertionError("iterated past the cap")
+            yield f"k{i}", i
+
+    def __iter__(self):
+        raise AssertionError("dict iterated directly")
+
+
+def test_write_caps_lazily_never_materializing_a_huge_container(tmp_path: Path):
+    snap = make_snapshot()
+    snap.quota = {"l": _TripList(), "d": _TripDict()}
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)  # AssertionError here would mean unbounded iteration
+    doc = _strict_load(path)
+    n_l, n_d = len(doc["quota"]["l"]), len(doc["quota"]["d"])
+    assert n_l + n_d < 100_000 and max(n_l, n_d) > 0

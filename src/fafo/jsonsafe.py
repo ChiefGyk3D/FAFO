@@ -7,10 +7,12 @@ can never hit the interpreter recursion limit (which differs between Python vers
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import math
 
 MAX_DEPTH = 32  # container nesting levels kept; deeper values become None
 MAX_NODES = 100_000  # values visited; the rest become None
+MAX_INT_BITS = 63  # wider ints are not plain JSON numbers here (and huge ones break dumps)
 
 
 def _items(container):
@@ -73,6 +75,8 @@ def check_finite(value) -> None:
                 stack.append((item, depth + 1))
             elif isinstance(item, float) and not math.isfinite(item):
                 raise ValueError("non-finite number")
+            elif isinstance(item, int) and item.bit_length() > MAX_INT_BITS:
+                raise ValueError("integer too wide")
 
 
 def _is_dataclass_instance(v) -> bool:
@@ -84,27 +88,30 @@ def plain_copy(value) -> tuple[object, int]:
 
     Iterative, with the same MAX_DEPTH and MAX_NODES caps as finite_copy. Returns the copy and
     the number of replaced values. Replaced with None: NaN and infinities, anything nested past
-    the depth cap; list and dict entries beyond the node cap are dropped (counted once per container); a
+    the depth cap; list and dict entries beyond the node cap are dropped (counted once per container, so the count is a lower bound); a
     scalar that is not None, bool, int, float or str is also replaced. Dict entries whose key is not a str are dropped (and counted). Never raises for a bad
     value and never recurses."""
     replaced = 0
 
     def scalar(v):
         nonlocal replaced
-        if v is None or type(v) in (bool, int, str):
+        if type(v) is int or (isinstance(v, int) and not isinstance(v, bool)):
+            if v.bit_length() <= MAX_INT_BITS:  # never str() a huge int
+                return v
+        elif v is None or isinstance(v, (bool, str)):
             return v
-        if isinstance(v, float):
+        elif isinstance(v, float):
             if math.isfinite(v):
                 return v
-        elif isinstance(v, (bool, int, str)):
-            return v  # subclasses
         replaced += 1
         return None
 
-    def children(src):
+    def children(src, budget):
         if _is_dataclass_instance(src):
             return [(f.name, getattr(src, f.name, None)) for f in dataclasses.fields(src)]
-        return list(_items(src))
+        # Lazy: pull at most budget + 1 entries, so a huge untrusted container is never
+        # materialized (the extra one tells us there was overflow).
+        return itertools.islice(_items(src), max(budget, 0) + 1)
 
     def container(v) -> bool:
         return _is_container(v) or _is_dataclass_instance(v)
@@ -116,7 +123,7 @@ def plain_copy(value) -> tuple[object, int]:
     nodes = 1
     while stack:
         src, dst, depth = stack.pop()
-        for key, item in children(src):
+        for key, item in children(src, MAX_NODES - nodes):
             if isinstance(dst, dict) and type(key) is not str:
                 replaced += 1
                 continue

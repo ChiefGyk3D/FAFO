@@ -13,7 +13,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import get_args
 
-from .jsonsafe import check_finite, plain_copy
+from .jsonsafe import MAX_INT_BITS, check_finite, plain_copy
 from .model import (
     SNAPSHOT_VERSION,
     Inflight,
@@ -85,7 +85,7 @@ def write_snapshot(
 
 
 def _int(v):
-    if type(v) is not int or v < 0:
+    if type(v) is not int or v < 0 or v.bit_length() > MAX_INT_BITS:
         raise TypeError("expected non-negative int")
 
 
