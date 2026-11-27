@@ -98,9 +98,7 @@ def plain_copy(value) -> tuple[object, int]:
         if type(v) is int or (isinstance(v, int) and not isinstance(v, bool)):
             if v.bit_length() <= MAX_INT_BITS:  # never str() a huge int
                 return v
-        elif v is None or isinstance(v, (bool, str)):
-            return v
-        elif isinstance(v, float) and math.isfinite(v):
+        elif v is None or isinstance(v, (bool, str)) or (isinstance(v, float) and math.isfinite(v)):
             return v
         replaced += 1
         return None
