@@ -23,7 +23,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
+import time
 from collections.abc import Callable, Mapping, Sequence
 
 from fafo.adapters.base import Enrichment, clean
@@ -64,26 +67,51 @@ def _depth_ok(obj: object) -> bool:
 
 
 def _default_runner(argv: Sequence[str], timeout_s: float, env: Mapping[str, str]) -> bytes:
-    """Run argv, return at most MAX_OUTPUT + 1 bytes of stdout. Raises on missing or timeout."""
-    with subprocess.Popen(
+    """Run argv; return at most MAX_OUTPUT + 1 bytes of stdout.
+
+    One monotonic deadline covers the whole call (reads and exit). On deadline or oversize
+    the child's whole process group is killed. Raises FileNotFoundError or
+    subprocess.TimeoutExpired.
+    """
+    proc = subprocess.Popen(
         list(argv),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=dict(env),
         shell=False,
-    ) as proc:
+        start_new_session=True,
+        bufsize=0,
+    )
+    deadline = time.monotonic() + timeout_s
+    buf = bytearray()
+    try:
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        with selectors.DefaultSelector() as sel:
+            sel.register(fd, selectors.EVENT_READ)
+            while len(buf) <= MAX_OUTPUT:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not sel.select(remaining):
+                    raise subprocess.TimeoutExpired(list(argv), timeout_s)
+                chunk = os.read(fd, min(65536, MAX_OUTPUT + 1 - len(buf)))
+                if not chunk:
+                    break
+                buf += chunk
+        if len(buf) <= MAX_OUTPUT:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return bytes(buf)
+    finally:
+        try:  # before reaping, so the group id cannot have been reused
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if proc.stdout is not None:
+            proc.stdout.close()
         try:
-            assert proc.stdout is not None
-            data = proc.stdout.read(MAX_OUTPUT + 1)
-            proc.wait(timeout=timeout_s)
+            proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            raise
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-    return data
+            pass
 
 
 class SafoAdapter:
