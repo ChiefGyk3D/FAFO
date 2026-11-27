@@ -109,4 +109,6 @@ sensitive prose, on screen and in screenshots. Use it only if you are comfortabl
 Status: early development. See `docs/superpowers/specs/` for the design and
 `docs/superpowers/plans/` for the implementation plan.
 
+Contributing and review process: see `CONTRIBUTING.md`.
+
 License: Apache-2.0. Security reports: see `SECURITY.md`.
