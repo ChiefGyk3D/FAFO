@@ -1,9 +1,14 @@
 """GitHub REST client for Actions runs and jobs. Read-only, polite, token-safe.
 
-- The token is read from the environment at call time and used only for the
-  `Authorization: Bearer` header of one request to the configured https base host. It is
-  never stored on the instance, never logged and never placed in an exception: error text is
-  built from fixed words, status codes and exception class names only.
+- The token comes from `token_file` when one is configured (re-read when the file changes,
+  so a token refreshed by another program is picked up), else from the environment at call
+  time. It is used only for the `Authorization: Bearer` header of one request to the
+  configured https base host. It is held only in the TokenSource cache entry, never logged and
+  never placed in an exception: error text is built from fixed words, status codes and
+  exception class names only. A token file must be a regular file (not a symlink), owned by
+  the effective user, with no group or other permission bits, at most 8192 bytes.
+- On 401 (or a 403 that is not a rate limit) the token is re-read once and the request is
+  retried once; a second failure raises GhAuthError.
 - Redirects are never followed; a 3xx is an error (no credential carry to another host).
 - Conditional requests: an ETag per URL (at most 256 entries), `If-None-Match`, and a 304
   returns the cached body. A per-URL minimum spacing (the larger of the constructor floor and
@@ -19,10 +24,13 @@ Only the endpoints for workflow runs and the jobs of a run are used ("Actions: r
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import logging
 import math
 import os
+import re
+import stat
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
@@ -39,6 +47,8 @@ PER_PAGE = 30
 REQUEST_TIMEOUT_S = 10.0
 _MAX_BACKOFF_S = 3600.0
 _DEFAULT_BACKOFF_S = 60.0
+MAX_TOKEN_FILE = 8192
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.=-]{1,2048}")
 _STATUSES = frozenset({"queued", "in_progress", "completed", "waiting", "requested", "pending"})
 
 _log = logging.getLogger("fafo.ghapi")
@@ -54,6 +64,13 @@ class GhError(Exception):
 
 class GhArgError(GhError, ValueError):
     """A caller argument (repo, status, run id) failed validation; nothing was sent."""
+
+
+class GhAuthError(GhError):
+    """The token was rejected even after re-reading it. The text is fixed and value-free."""
+
+    def __init__(self) -> None:
+        super().__init__("token expired or rejected")
 
 
 class RateLimited(GhError):
@@ -112,6 +129,115 @@ def _num(value: object) -> float | None:
     return n if math.isfinite(n) else None
 
 
+class TokenSource:
+    """The current GitHub token: from a guarded file when configured, else the environment.
+
+    The cache entry is the only place the token is held; repr never shows it.
+    """
+
+    def __init__(self, token_env: str, token_file: str | None = None) -> None:
+        self._env = token_env
+        self._file = token_file
+        self._entry: tuple[tuple[int, int, int], str] | None = None
+
+    def __repr__(self) -> str:
+        return f"TokenSource(file={self._file is not None})"
+
+    @staticmethod
+    def _refusal(st: os.stat_result) -> str:
+        """The reason class for a stat result that must not be used, else ''."""
+        if stat.S_ISLNK(st.st_mode):
+            return "symlink"
+        if not stat.S_ISREG(st.st_mode):
+            return "not a regular file"
+        if st.st_uid != os.geteuid():
+            return "wrong owner"
+        if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return "permissions"
+        if st.st_size == 0:
+            return "empty"
+        if st.st_size > MAX_TOKEN_FILE:
+            return "too large"
+        return ""
+
+    @staticmethod
+    def _signature(st: os.stat_result) -> tuple[int, int, int]:
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def _from_file(self, force: bool) -> str | None:
+        """The token in the file, or None when the file does not exist. Raises GhError."""
+        path = self._file or ""
+        problem = ""
+        token: str | None = None
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            st = None
+            problem = "token file unreadable"
+        if st is not None:
+            reason = self._refusal(st)
+            if reason:
+                problem = f"token file refused: {reason}"
+            elif not force and self._entry is not None and self._entry[0] == self._signature(st):
+                return self._entry[1]
+            else:
+                token, problem = self._read(path)
+        if problem:
+            self._entry = None
+            raise GhError(problem)
+        return token
+
+    def _read(self, path: str) -> tuple[str | None, str]:
+        """Open without following links, re-check on the descriptor, read, validate."""
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None, "token file not found"
+        except OSError as exc:
+            return None, "token file refused: symlink" if exc.errno == errno.ELOOP else "token file unreadable"
+        data = b""
+        try:
+            st = os.fstat(fd)
+            reason = self._refusal(st)
+            if reason:
+                return None, f"token file refused: {reason}"
+            while len(data) <= MAX_TOKEN_FILE:
+                chunk = os.read(fd, MAX_TOKEN_FILE + 1 - len(data))
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            return None, "token file unreadable"
+        finally:
+            os.close(fd)
+        if len(data) > MAX_TOKEN_FILE:
+            return None, "token file refused: too large"
+        try:
+            text = data.decode("ascii").strip()
+        except UnicodeDecodeError:
+            return None, "token file invalid"
+        if _TOKEN_RE.fullmatch(text) is None:
+            return None, "token file refused: empty" if not text else "token file invalid"
+        self._entry = (self._signature(st), text)
+        return text, ""
+
+    def get(self, force: bool = False) -> str:
+        """The current token. `force` skips the cache (after a 401). Raises GhError."""
+        if self._file is not None:
+            token = self._from_file(force)
+            if token is not None:
+                return token
+        token = os.environ.get(self._env)
+        if not token:
+            raise GhError(
+                "token file not found" if self._file is not None else "token environment variable is not set"
+            )
+        return token
+
+
 class GhClient:
     def __init__(
         self,
@@ -120,11 +246,14 @@ class GhClient:
         http: Http | None = None,
         clock: Callable[[], float] = time.time,
         min_interval_s: float = 10.0,
+        *,
+        token_file: str | None = None,
     ) -> None:
         parts = urlsplit(base_url)
         if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
             raise ValueError("base_url must be an https url without credentials")
         self._token_env = token_env
+        self._tokens = TokenSource(token_env, token_file)
         self._base = base_url.rstrip("/")
         self._http: Http = http or _httpx_http
         self._clock = clock
@@ -192,6 +321,18 @@ class GhClient:
         self._not_before = max(self._not_before, until)
         return self._not_before
 
+    @staticmethod
+    def _is_auth_failure(status: int, hdr: Mapping[str, str]) -> bool:
+        """401, or a 403 that carries no sign of a rate limit (429 never counts)."""
+        if status == 401:
+            return True
+        if status != 403 or "retry-after" in hdr:
+            return False
+        remaining = _num(hdr.get("x-ratelimit-remaining", ""))
+        if remaining is not None:
+            return remaining > 0
+        return "x-ratelimit-reset" not in hdr
+
     def _get(self, path: str, key: str) -> list[dict]:
         now = self._clock()
         if now < self._not_before:
@@ -200,30 +341,36 @@ class GhClient:
         if entry is not None and now - entry.fetched < entry.spacing:
             self._cache.move_to_end(path)
             return copy.deepcopy(entry.body)
-        token = os.environ.get(self._token_env)
-        if not token:
-            raise GhError("token environment variable is not set")
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "fafo",
-            "Authorization": f"Bearer {token}",
-        }
-        if entry is not None and entry.etag:
-            headers["If-None-Match"] = entry.etag
-        self._requests += 1
-        failed = ""
-        try:
-            status, resp_headers, body = self._http("GET", self._base + path, headers, REQUEST_TIMEOUT_S)
-        except (OSError, ValueError, RuntimeError) as exc:
-            failed = type(exc).__name__
-        finally:
-            del token, headers
-        if failed:
-            # Raised outside the except block: the transport error (which may echo the
-            # request headers) must not stay reachable through __context__.
-            raise GhError(f"github request failed ({failed})")
-        hdr = {str(k).lower(): str(v) for k, v in resp_headers.items()}
+        for attempt in (0, 1):
+            token = self._tokens.get(force=attempt == 1)
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "fafo",
+                "Authorization": f"Bearer {token}",
+            }
+            if entry is not None and entry.etag:
+                headers["If-None-Match"] = entry.etag
+            self._requests += 1
+            failed = ""
+            try:
+                status, resp_headers, body = self._http(
+                    "GET", self._base + path, headers, REQUEST_TIMEOUT_S
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                failed = type(exc).__name__
+            finally:
+                del token, headers
+            if failed:
+                # Raised outside the except block: the transport error (which may echo the
+                # request headers) must not stay reachable through __context__.
+                raise GhError(f"github request failed ({failed})")
+            hdr = {str(k).lower(): str(v) for k, v in resp_headers.items()}
+            if not self._is_auth_failure(status, hdr):
+                break
+            _log.debug("github GET status=%s attempt=%s", status, attempt)
+        else:
+            raise GhAuthError()
         now = self._clock()
         _log.debug("github GET status=%s", status)
 

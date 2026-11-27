@@ -1,0 +1,13 @@
+{
+  "name": "fafo-pane",
+  "version": "0.1.0",
+  "description": "FAFO pane: shows the agent and CI flow in Claude Code's sidebar by reading the views.json the FAFO collector writes. Read only, no subprocess.",
+  "userConfig": {
+    "viewsPath": {
+      "type": "string",
+      "title": "views.json path",
+      "description": "Absolute path of the FAFO views.json, or ~/ followed by a path under your home folder. The file name must be exactly views.json and the path must not contain .., . or empty parts; anything else is refused. Empty uses $XDG_RUNTIME_DIR/fafo/views.json, else ~/.local/state/fafo/views.json.",
+      "default": ""
+    }
+  }
+}
