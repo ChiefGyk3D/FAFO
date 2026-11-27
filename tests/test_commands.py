@@ -449,31 +449,51 @@ def test_json_command_with_nan_in_file_is_no_collector(tmp_path, capfdbinary):
 # ---- README shell blocks -------------------------------------------------------------------
 
 FENCE = re.compile(r"^```(?:sh|bash|shell|console)?\s*$")
+HEADING = re.compile(r"^#{1,6}\s")
+MARKER = "<!-- fafo-readme-rule: requires-install-above -->"
 README = ROOT / "README.md"
 
 
 def readme_command_problems(text: str) -> list[str]:
-    """Rule: in README shell blocks, a line starting with `fafo ` (a bare command) needs an
-    earlier `pipx install` or `activate` line in a shell block. Commands invoked by full path
-    (a path ending in /fafo) never start with `fafo ` and are always fine.
+    """README rule for bare `fafo <cmd>` lines (a line that starts with `fafo`) in fenced
+    shell blocks (no language, sh, bash, shell or console).
+
+    A bare command passes only if one of these holds:
+    - an earlier line in the SAME SECTION (since the last Markdown heading line outside a
+      fence, any `#` level) inside a shell block is `pipx install ...` or `source .../activate`
+      (the same block counts); a plain `pip install` does not, its binary is not on PATH; or
+    - the block's opening fence is on the line immediately after the marker line
+      `<!-- fafo-readme-rule: requires-install-above -->` AND a `pipx install` line appeared
+      earlier in the README. The marker means "this block follows the pipx install above"; it
+      is never valid for the venv path, whose commands use the full path instead.
+    Commands invoked by full path never start with `fafo` and always pass. A heading resets the
+    section state, so an install line in an earlier section does not carry over.
     """
     problems: list[str] = []
     in_block = False
-    ready = False
+    ready = False  # install or activate seen in this section
+    pipx_seen = False  # a pipx install line appeared anywhere earlier
+    marked = False  # the current block was opened right after the marker
+    prev = ""
     for n, line in enumerate(text.splitlines(), 1):
+        before, prev = prev, line.strip()
         if line.startswith("```"):
             if in_block:
                 in_block = False
             elif FENCE.match(line):
                 in_block = True
+                marked = before == MARKER and pipx_seen
             continue
         if not in_block:
+            if HEADING.match(line):
+                ready = False
             continue
         stripped = line.strip()
-        if stripped.startswith("pipx install") or "pipx install " in stripped \
-                or re.search(r"(?:^|\s)(?:source|\.)\s+\S*activate\b", stripped):
+        if "pipx install " in stripped or stripped == "pipx install":
+            ready = pipx_seen = True
+        elif re.search(r"(?:^|\s)(?:source|\.)\s+\S*activate\b", stripped):
             ready = True
-        elif re.match(r"fafo(\s|$)", stripped) and not ready:
+        elif re.match(r"fafo(\s|$)", stripped) and not (ready or marked):
             problems.append(f"README.md:{n}: {stripped}")
     return problems
 
@@ -481,6 +501,7 @@ def readme_command_problems(text: str) -> list[str]:
 def test_readme_bare_fafo_commands_follow_an_install_line():
     text = README.read_text(encoding="utf-8")
     assert len(re.findall(r"^fafo ", text, re.MULTILINE)) >= 5  # the quickstart commands were found
+    assert "fafo-venv/bin/fafo" in text  # the venv path uses full paths
     assert readme_command_problems(text) == []
     assert EM not in text
 
@@ -498,6 +519,39 @@ def test_readme_rule_bites():
     assert readme_command_problems(full) == []
     # an install line in prose or in a non-shell block does not count
     assert readme_command_problems("pipx install .\n```\nfafo doctor\n```\n")
+
+
+def test_readme_rule_is_section_scoped():
+    venv_only = ("## Venv\n\n```\npython3 -m venv v\nv/bin/pip install .\n"
+                 "v/bin/fafo doctor\nfafo run\n```\n")
+    assert len(readme_command_problems(venv_only)) == 1  # only the bare `fafo run`
+    prev_section = ("## One\n```\npipx install .\nfafo doctor\n```\n"
+                    "## Two\n```\nfafo run\n```\n")
+    got = readme_command_problems(prev_section)
+    assert len(got) == 1 and got[0].endswith("fafo run")
+    # a heading of any level resets; a `#` line inside a fence is a comment, not a heading
+    for h in ("# H", "### H", "###### H"):
+        assert readme_command_problems(f"pipx x\n```\npipx install .\n```\n{h}\n```\nfafo a\n```\n")
+    same = "## One\n```\npipx install .\n```\ntext\n```\nfafo run\n```\n"
+    assert readme_command_problems(same) == []
+    comment = "## One\n```\npipx install .\n# comment\nfafo run\n```\n"
+    assert readme_command_problems(comment) == []
+
+
+def test_readme_marker_rules():
+    install = "## One\n```\npipx install .\n```\n"
+    marked = install + "## Two\n" + MARKER + "\n```\nfafo run\n```\n"
+    assert readme_command_problems(marked) == []
+    # the marker must be on the line immediately before the fence
+    gap = install + "## Two\n" + MARKER + "\n\n```\nfafo run\n```\n"
+    assert len(readme_command_problems(gap)) == 1
+    # it covers only the block that follows it
+    two = install + "## Two\n" + MARKER + "\n```\nfafo run\n```\n```\nfafo table\n```\n"
+    got = readme_command_problems(two)
+    assert len(got) == 1 and got[0].endswith("fafo table")
+    # with no pipx install anywhere earlier (venv path only) the marker is not honored
+    venv = "## V\n```\nv/bin/pip install .\n```\n## Two\n" + MARKER + "\n```\nfafo run\n```\n"
+    assert len(readme_command_problems(venv)) == 1
 
 
 def test_unit_default_matches_readme_and_both_paths_documented():

@@ -22,16 +22,8 @@ pipx install .
 fafo doctor     # run every enabled source once and report ok, absent, down or stale
 ```
 
-Alternative without pipx: a virtual environment. Its commands are not on your PATH, so call
-them by full path (or run `source ~/.local/share/fafo-venv/bin/activate` first):
-
-```
-python3 -m venv ~/.local/share/fafo-venv
-~/.local/share/fafo-venv/bin/pip install .
-~/.local/share/fafo-venv/bin/fafo doctor
-```
-
-The commands below are written for the pipx install; with a venv, put the full path in front.
+The commands below are written for the pipx install. To use a virtual environment instead,
+see "Alternative: virtual environment" further down.
 
 ```
 fafo run        # the collector: polls the sources and writes the snapshot until Ctrl-C
@@ -50,6 +42,20 @@ running they show "collector not running" and exit 0; `fafo json` prints
 
 To keep the collector running, see `examples/systemd/` for a systemd user unit (its `ExecStart=`
 must point at your install: `~/.local/bin/fafo` for pipx, the venv `bin` otherwise).
+
+### Alternative: virtual environment
+
+Without pipx, install into a virtual environment. Its `fafo` is not on your PATH, so every
+command is written with the full path (or run `source ~/.local/share/fafo-venv/bin/activate`
+in that shell first and then use the bare commands above).
+
+```
+python3 -m venv ~/.local/share/fafo-venv
+~/.local/share/fafo-venv/bin/pip install .
+~/.local/share/fafo-venv/bin/fafo doctor
+~/.local/share/fafo-venv/bin/fafo run
+~/.local/share/fafo-venv/bin/fafo table
+```
 
 ### You are here
 
