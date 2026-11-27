@@ -31,6 +31,8 @@ def make_snapshot(taken: float = 1000.0) -> Snapshot:
         started=900.0,
         cpu=1.5,
         rss=1024,
+        name="fix-tests",
+        address="11111111-2222-3333-4444-555555555555",
     )
     proc = Proc(
         pid=43, ppid=42, session_pid=42, agent="claude", cmd="git status",
@@ -165,6 +167,8 @@ def _mutations():
         "session_cpu_nan": setter("sessions", 0, "cpu", value=float("nan")),
         "session_cpu_inf": setter("sessions", 0, "cpu", value=float("inf")),
         "session_agent_none": setter("sessions", 0, "agent", value=None),
+        "session_name_none": setter("sessions", 0, "name", value=None),
+        "session_address_int": setter("sessions", 0, "address", value=7),
         "session_rss_negative": setter("sessions", 0, "rss", value=-5),
         "session_project_not_dict": setter("sessions", 0, "project", value="demo"),
         "session_project_value_int": setter("sessions", 0, "project", "value", value=3),
@@ -258,3 +262,30 @@ def test_write_never_chmods_existing_directory(tmp_path: Path):
     d.chmod(0o755)
     write_snapshot(d / "snap.json", make_snapshot())
     assert stat.S_IMODE(d.stat().st_mode) == 0o755
+
+
+def test_session_name_and_address_roundtrip(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, make_snapshot())
+    got = read_snapshot(path)
+    assert got is not None
+    assert got.sessions[0].name == "fix-tests"
+    assert got.sessions[0].address == "11111111-2222-3333-4444-555555555555"
+
+
+def test_older_snapshot_without_name_and_address_reads_as_empty(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    del doc["sessions"][0]["name"]
+    del doc["sessions"][0]["address"]
+    path.write_text(json.dumps(doc))
+    got = read_snapshot(path)
+    assert got is not None
+    assert got.sessions[0].name == ""
+    assert got.sessions[0].address == ""
+
+
+def test_session_unknown_extra_field_still_rejected(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    doc["sessions"][0]["peerToken"] = "x"
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
