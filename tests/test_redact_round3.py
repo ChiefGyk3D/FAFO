@@ -24,7 +24,7 @@ LEAK_CASES = {
 @pytest.mark.parametrize("value", list(LEAK_CASES.values()), ids=list(LEAK_CASES))
 def test_spacing_and_length_cannot_hide_a_secret(value):
     assert len(value) <= MAX_TOKEN_LEN
-    out = redact_argv(["tool", "--env", value], {"--env"})
+    out = redact_argv(["tool", "--env", value], {"--env"}, value_flags=frozenset({"--env"}))
     assert "hunter2" not in out
     assert "aGh1bnRlcjI" not in out
     assert out == "tool --env <redacted>"
@@ -35,7 +35,8 @@ def test_leak_cases_collected():
 
 
 def test_innocent_spaced_text_is_still_kept():
-    out = redact_argv(["tool", "--label", "hello" + SP * 12 + "world"], {"--label"})
+    out = redact_argv(["tool", "--label", "hello" + SP * 12 + "world"], {"--label"},
+                      value_flags=frozenset({"--label"}))
     assert out == "tool --label hello" + SP * 12 + "world"
 
 

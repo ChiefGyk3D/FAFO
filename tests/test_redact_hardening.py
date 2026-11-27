@@ -9,6 +9,11 @@ from fafo.redact import redact_argv
 ROUND2 = json.loads((Path(__file__).parent / "fixtures" / "argv_secrets_round2.json").read_text())
 ESC = chr(0x1B)
 ZW = chr(0x200B)
+VF = frozenset({"--model"})
+
+
+def _value_flags(case):
+    return frozenset(a for a in case["show"] if a.startswith("-"))
 
 
 def test_round2_fixture_collected():
@@ -17,30 +22,33 @@ def test_round2_fixture_collected():
 
 @pytest.mark.parametrize("case", ROUND2, ids=[c["name"] for c in ROUND2])
 def test_round2_secret_never_in_output(case):
-    out = redact_argv(case["argv"], set(case["show"]))
+    out = redact_argv(case["argv"], set(case["show"]), value_flags=_value_flags(case))
     assert case["secrets"]
     for secret in case["secrets"]:
         assert secret not in out, f"{secret!r} leaked in {out!r}"
 
 
 def test_zero_width_name_cannot_hide_from_shown_set():
-    out = redact_argv(["tool", f"--tok{ZW}en=abc4711"], {"--token"})
+    out = redact_argv(["tool", f"--tok{ZW}en=abc4711"], {"--token"},
+                      value_flags=frozenset({"--token"}))
     assert "abc4711" not in out
     assert ZW not in out
 
 
 def test_plain_path_value_still_kept():
-    out = redact_argv(["ssh", "-i", "/home/user/.ssh/id_ed25519"], {"-i"})
+    out = redact_argv(["ssh", "-i", "/home/user/.ssh/id_ed25519"], {"-i"},
+                      value_flags=frozenset({"-i"}))
     assert out == "ssh -i /home/user/.ssh/id_ed25519"
 
 
 def test_innocent_words_not_masked():
-    out = redact_argv(["tool", "--side", "left", "--model", "gpt-5"], {"--side", "--model"})
+    out = redact_argv(["tool", "--side", "left", "--model", "gpt-5"], {"--side", "--model"},
+                      value_flags=frozenset({"--side", "--model"}))
     assert out == "tool --side left --model gpt-5"
 
 
 def test_overlong_shown_value_masked_not_truncated():
-    out = redact_argv(["tool", "--model", "a b " * 100], {"--model"})
+    out = redact_argv(["tool", "--model", "a b " * 100], {"--model"}, value_flags=VF)
     assert out == "tool --model <redacted>"
 
 
@@ -65,9 +73,9 @@ ADVERSARIAL = [
 @pytest.mark.parametrize("tok", ADVERSARIAL, ids=[str(i) for i in range(len(ADVERSARIAL))])
 def test_adversarial_1mb_token_is_fast(tok):
     start = time.monotonic()
-    redact_argv(["tool", "--model", tok, tok], {"--model"})
-    redact_argv([tok, "--model", tok], {"--model"})
-    redact_argv(["tool", "--model=" + tok], {"--model"})
+    redact_argv(["tool", "--model", tok, tok], {"--model"}, value_flags=VF)
+    redact_argv([tok, "--model", tok], {"--model"}, value_flags=VF)
+    redact_argv(["tool", "--model=" + tok], {"--model"}, value_flags=VF)
     assert time.monotonic() - start < 0.5
 
 

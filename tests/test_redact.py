@@ -11,13 +11,18 @@ ESC = "\x1b"
 BEL = "\x07"
 
 
+def _value_flags(case):
+    """Fixture cases treat every shown dash-prefixed token as a flag taking a value."""
+    return frozenset(a for a in case["show"] if a.startswith("-"))
+
+
 def test_fixture_collected():
     assert len(CASES) >= 10
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
 def test_secret_never_in_output(case):
-    out = redact_argv(case["argv"], set(case["show"]))
+    out = redact_argv(case["argv"], set(case["show"]), value_flags=_value_flags(case))
     assert case["secrets"], "fixture case must name a secret"
     for secret in case["secrets"]:
         assert secret not in out, f"{secret!r} leaked in {out!r}"
@@ -32,17 +37,17 @@ def test_guard_bites_on_naive_join():
 
 def test_exe_basename_and_shown_args_kept():
     out = redact_argv(["/usr/bin/codex", "exec", "--model", "gpt-5", "do the thing"],
-                      {"exec", "--model"})
+                      {"exec", "--model"}, value_flags=frozenset({"--model"}))
     assert out == "codex exec --model gpt-5 <arg>"
 
 
 def test_ssh_identity_path_kept():
-    out = redact_argv(["ssh", "-i", "/path/key", "host"], {"-i"})
+    out = redact_argv(["ssh", "-i", "/path/key", "host"], {"-i"}, value_flags=frozenset({"-i"}))
     assert out == "ssh -i /path/key <arg>"
 
 
 def test_shown_flag_equals_form_kept():
-    assert redact_argv(["codex", "--model=gpt-5"], {"--model"}) == "codex --model=gpt-5"
+    assert redact_argv(["codex", "--model=gpt-5"], {"--model"}, value_flags=frozenset({"--model"})) == "codex --model=gpt-5"
 
 
 def test_env_prefix_not_shown():
@@ -74,7 +79,8 @@ def test_non_str_and_surrogate_items_safe():
 
 
 def test_control_chars_in_shown_args_stripped():
-    out = redact_argv(["tool", "--model", f"a{ESC}[31mb"], {"--model"})
+    out = redact_argv(["tool", "--model", f"a{ESC}[31mb"], {"--model"},
+                      value_flags=frozenset({"--model"}))
     assert ESC not in out
 
 

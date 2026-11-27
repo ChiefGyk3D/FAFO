@@ -3,6 +3,12 @@
 redact_argv is allowlist-first: only the executable name and arguments the
 caller names in show_args survive. Everything else becomes a placeholder.
 Retained values are additionally masked when they look like credentials.
+
+Flag arity is explicit. A shown flag is printed alone unless it is also named in
+the keyword-only value_flags set: only then is the following token (or the part
+after "=") treated as its value and kept, after normalization and credential
+masking. For a shown flag not in value_flags, the next token is handled like any
+other argument (<arg> unless itself shown) and "--flag=value" becomes <arg>.
 sanitize_text removes control characters and terminal escape sequences so
 untrusted text cannot drive a terminal.
 """
@@ -90,11 +96,14 @@ def _keep(value: str, name: str | None = None) -> str:
     return value
 
 
-def redact_argv(argv: list[str], show_args: set[str]) -> str:
+def redact_argv(
+    argv: list[str], show_args: set[str], *, value_flags: frozenset[str] = frozenset()
+) -> str:
     """Render argv for display. Keeps the executable basename and shown args only."""
     out: list[str] = []
     items = list(argv[: MAX_TOKENS * 4])
     shown = {_normalize(a) for a in show_args if isinstance(a, str) and len(a) <= MAX_TOKEN_LEN}
+    valued = {_normalize(a) for a in value_flags if isinstance(a, str) and len(a) <= MAX_TOKEN_LEN}
     i = 0
     n = len(items)
 
@@ -134,20 +143,19 @@ def redact_argv(argv: list[str], show_args: set[str]) -> str:
             out.append(ARG)
             continue
         if tok in shown:
-            nxt = norm(i) if i < n else None
             nxt_raw = items[i] if i < n else None
-            if tok.startswith("-") and isinstance(nxt_raw, str) and not (
-                nxt is not None and nxt.startswith("-")
-            ):
-                out.append(_keep(tok))
-                out.append(_keep(nxt, tok) if nxt is not None else MASK)
-                i += 1
-            else:
-                out.append(_keep(tok))
+            if tok in valued and isinstance(nxt_raw, str):
+                nxt = norm(i)
+                if nxt is None or not nxt.startswith("-"):
+                    out.append(_keep(tok))
+                    out.append(_keep(nxt, tok) if nxt is not None else MASK)
+                    i += 1
+                    continue
+            out.append(_keep(tok))
             continue
         if tok.startswith("-") and "=" in tok:
             name, _, value = tok.partition("=")
-            if name in shown:
+            if name in shown and name in valued:
                 out.append(f"{_keep(name)}={_keep(value, name)}")
                 continue
         out.append(ARG)
