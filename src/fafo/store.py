@@ -64,7 +64,7 @@ def write_snapshot(
     # the file is strict JSON that read_snapshot accepts. Log the count only, never the values.
     plain, replaced = plain_copy(snap)
     if replaced:
-        _log.warning("snapshot: replaced %d invalid values with null", replaced)
+        _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
     payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -95,6 +95,8 @@ def _opt_int(v):
 
 
 def _float(v):
+    if type(v) is int and v.bit_length() > MAX_INT_BITS:
+        raise TypeError("expected finite number")  # before math.isfinite: it overflows on big ints
     if type(v) not in (int, float) or not math.isfinite(v):
         raise TypeError("expected finite number")
 
@@ -219,5 +221,9 @@ def read_snapshot(path: Path) -> Snapshot | None:
     try:
         doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
         return _snapshot(doc)
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+    except (
+        OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
+        ArithmeticError, RecursionError,
+    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
+        _log.debug("snapshot unreadable: %s", type(exc).__name__)
         return None

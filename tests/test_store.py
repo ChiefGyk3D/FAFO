@@ -472,3 +472,86 @@ def test_write_caps_lazily_never_materializing_a_huge_container(tmp_path: Path):
     doc = _strict_load(path)
     n_l, n_d = len(doc["quota"]["l"]), len(doc["quota"]["d"])
     assert n_l + n_d < 100_000 and max(n_l, n_d) > 0
+
+
+FLOAT_FIELDS = [
+    ("taken", lambda d: d),
+    ("as_of", lambda d: d["sessions"][0]["project"]),
+    ("started", lambda d: d["sessions"][0]),
+    ("cpu", lambda d: d["sessions"][0]),
+    ("started", lambda d: d["procs"][0]),
+    ("cpu", lambda d: d["procs"][0]),
+    ("expires", lambda d: d["llm"]["models"][0]),
+    ("started", lambda d: d["llm"]["inflight"][0]),
+    ("elapsed", lambda d: d["runners"][0]),
+    ("load", lambda d: d["runners"][0]),
+    ("mem", lambda d: d["runners"][0]),
+    ("disk", lambda d: d["runners"][0]),
+    ("last_ok", lambda d: d["health"][0]),
+]
+
+
+def _good_doc(tmp_path: Path) -> dict:
+    p = tmp_path / "good.json"
+    write_snapshot(p, make_snapshot())
+    return json.loads(p.read_text())
+
+
+def test_huge_ints_in_every_typed_float_field_refuse_cleanly(tmp_path: Path):
+    path = tmp_path / "bad.json"
+    for name, locate in FLOAT_FIELDS:
+        for bad in (2**1024, 10**400, -(2**1024)):
+            doc = _good_doc(tmp_path)
+            locate(doc)[name] = bad
+            path.write_text(json.dumps(doc))
+            assert read_snapshot(path) is None, (name, bad)
+
+
+def test_writer_scrubs_huge_int_in_typed_float_field(tmp_path: Path):
+    snap = make_snapshot()
+    snap.procs[0].cpu = 10**400
+    path = tmp_path / "snap.json"
+    write_snapshot(path, snap)
+    assert _strict_load(path)["procs"][0]["cpu"] is None
+    assert read_snapshot(path) is None  # typed field became null: refused, not raised
+
+
+def test_read_never_raises_on_seeded_mutations(tmp_path: Path):
+    import random
+
+    rng = random.Random(64)
+    path = tmp_path / "fuzz.json"
+    junk = [2**1024, 10**400, 2**63, True, False, -1, 1e308, "x", None, [], {}, "@@1e999@@"]
+
+    def leaves(node, trail=()):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from leaves(v, (*trail, k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from leaves(v, (*trail, i))
+        else:
+            yield trail
+
+    for _ in range(300):
+        doc = _good_doc(tmp_path)
+        for _ in range(rng.randint(1, 3)):
+            trail = rng.choice(list(leaves(doc)))
+            if not trail:
+                continue
+            node = doc
+            for k in trail[:-1]:
+                node = node[k]
+            node[trail[-1]] = rng.choice(junk)
+        path.write_text(json.dumps(doc).replace('"@@1e999@@"', "1e999"))
+        result = read_snapshot(path)  # must not raise
+        assert result is None or isinstance(result, Snapshot)
+
+
+def test_sanitize_warning_wording_and_no_values(tmp_path: Path, caplog):
+    snap = make_snapshot()
+    snap.host = {"secret-key": float("nan"), 7: "dropped-key-value", "x": 10**400}
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(tmp_path / "snap.json", snap)
+    msgs = [r.getMessage() for r in caplog.records if r.name == "fafo.store"]
+    assert msgs == ["snapshot: sanitized 3 values (nulled, dropped or truncated)"]

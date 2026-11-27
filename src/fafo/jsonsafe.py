@@ -58,6 +58,8 @@ def check_finite(value) -> None:
     """Raise ValueError for a non-finite float, nesting deeper than MAX_DEPTH or more than
     MAX_NODES values anywhere in value."""
     if not _is_container(value):
+        if isinstance(value, int) and value.bit_length() > MAX_INT_BITS:
+            raise ValueError("integer too wide")
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("non-finite number")
         return
