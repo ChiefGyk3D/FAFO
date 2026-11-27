@@ -62,6 +62,12 @@ enabled = true
 ## The value is read from the environment at call time; it is never stored or printed.
 ## Without it the runners source still works over ssh, without job details.
 # token_env = "FAFO_GITHUB_TOKEN"
+## Or a PATH (absolute) to a file that holds the token. The file is re-read when it changes,
+## so a token that something else refreshes (GitHub App tokens last about an hour) keeps
+## working. FAFO never creates, refreshes or stores the token. The file must be a regular
+## file (not a symlink) owned by you, mode 0600 or tighter, at most 8 KB, holding only the
+## token. When both are set the file wins; a missing file falls back to the variable.
+# token_file = "/run/user/1000/fafo-github-token"
 ##
 ## One table per runner host.
 # [[sources.runners.hosts]]
@@ -84,8 +90,14 @@ enabled = true
 ## Repositories to look at (owner/name).
 # repos = ["owner/name"]
 ## NAME of the environment variable that holds a read-only GitHub token.
-## If it is not set the source is skipped and doctor reports it as absent.
+## If neither it nor token_file is set the source is skipped and doctor reports it as absent.
 # token_env = "FAFO_GITHUB_TOKEN"
+## Or a PATH (absolute) to a file that holds the token. The file is re-read when it changes,
+## so a token that something else refreshes (GitHub App tokens last about an hour) keeps
+## working. FAFO never creates, refreshes or stores the token. The file must be a regular
+## file (not a symlink) owned by you, mode 0600 or tighter, at most 8 KB, holding only the
+## token. When both are set the file wins; a missing file falls back to the variable.
+# token_file = "/run/user/1000/fafo-github-token"
 ## Workflow paths you have verified as Copilot coding-agent sessions. Optional.
 # session_paths = ["dynamic/agents/example"]
 #@ END example
