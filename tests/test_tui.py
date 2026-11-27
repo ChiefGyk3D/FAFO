@@ -729,3 +729,59 @@ def test_quits_on_q(snap_path):
             assert not app.is_running or app._exit
 
     run(go())
+
+
+def test_change_read_while_paused_shows_after_resume(snap_path):
+    """A read made while paused (and dropped) must not be recorded as seen."""
+    a = three()
+    a.sessions[0].name = "name-A"
+    a.health = []  # health ages tick every second and would mask the bug
+    write_snapshot(snap_path, a)
+
+    async def go():
+        app = make(snap_path, refresh=0.25)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await first(pilot, app)
+            assert "name-A" in app.dump()
+            # a read that is already in flight when pause is pressed gets dropped by the UI
+            app.paused = True  # UI side drops results; the reader keeps reading
+            b = three()
+            b.sessions[0].name = "name-B"
+            b.health = []
+            write_snapshot(snap_path, b)
+            await pilot.pause(1.0)  # several reads of B happen and are dropped
+            assert "name-B" not in app.dump()
+            app.paused = False  # resume
+            await pilot.pause(0.9)  # within a few refresh intervals
+            assert "name-B" in app.dump()
+            assert "name-A" not in app.dump()
+
+    run(go())
+
+
+def test_unchanged_file_after_resume_does_not_rebuild(snap_path, monkeypatch):
+    s = three()
+    s.health = []  # health ages tick every second and would count as a change
+    write_snapshot(snap_path, s)
+    rebuilds = []
+    real = FafoApp._rebuild
+
+    def counting(self):
+        rebuilds.append(1)
+        return real(self)
+
+    monkeypatch.setattr(FafoApp, "_rebuild", counting)
+
+    async def go():
+        app = make(snap_path, refresh=0.25)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await first(pilot, app)
+            await pilot.press("p")
+            await pilot.pause(0.6)
+            await pilot.press("p")
+            n = len(rebuilds)
+            await settle(pilot, app, 3)
+            assert len(rebuilds) == n  # nothing changed, the cheap path ran
+            assert "src-1" in app.dump()
+
+    run(go())

@@ -474,8 +474,11 @@ def build_drill_page(views: Views, sid: str | None, width: int) -> Page:
 class ReadResult(Message):
     """One refresh outcome from the reader thread. views is None only when the read raised."""
 
-    def __init__(self, views: Views | None, changed: bool, at: float, error: str) -> None:
+    def __init__(
+        self, views: Views | None, changed: bool, at: float, error: str, sig: Any = None
+    ) -> None:
         super().__init__()
+        self.sig = sig  # signature of views; the UI records it only when it APPLIES the result
         self.views = views
         self.changed = changed
         self.at = at
@@ -570,6 +573,7 @@ class FafoApp(App[int]):
         self._unpaused = threading.Event()
         self._unpaused.set()
         self._thread: threading.Thread | None = None
+        self._applied_sig: Any = None  # written by the UI thread only, read by the reader
 
     # -- layout --------------------------------------------------------------------------
 
@@ -634,27 +638,27 @@ class FafoApp(App[int]):
     # -- reader thread (the only code that touches the filesystem) -----------------------------
 
     def _reader(self) -> None:
-        prev = None
         while not self._stop.is_set():
             if self._unpaused.is_set():
                 now = time.time()
                 views: Views | None = None
                 error = ""
                 changed = False
+                sig = None
                 try:
                     views = read_views(self.snapshot_path, now, current_session_id=self.session_id)
                     if views.age_s is None:
                         error = "snapshot missing or unreadable"
                     else:
                         sig = dataclasses.replace(views, age_s=None)
-                        changed = prev is None or sig != prev
-                        prev = sig
+                        # compared with what the UI has APPLIED, never with what was read
+                        changed = sig != self._applied_sig
                 except Exception as e:
                     log.exception("tui: caught, continuing")
                     views = None
                     error = _one_line(f"{type(e).__name__}: {e}", 100)
                 try:
-                    self.post_message(ReadResult(views, changed, now, error))
+                    self.post_message(ReadResult(views, changed, now, error, sig))
                 except Exception:
                     log.exception("tui: caught, continuing")
                     return
@@ -690,6 +694,7 @@ class FafoApp(App[int]):
             if res.changed or first:
                 self._rebuild()
                 self.fault = ""  # cleared only once a rebuild really worked
+            self._applied_sig = res.sig  # advance only after the result was applied
         elif self.last_good is not None:
             # keep showing the last good views; the header marks them stale with their age
             self.read_note = f"read failed: {res.error or 'unknown'}; showing last good data"
