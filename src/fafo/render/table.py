@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import asdict, dataclass
 
+from ..jsonsafe import finite_copy
 from ..model import Snapshot
 from .view import (
     Group,
@@ -226,15 +228,36 @@ def format_table(views: Views, width: int = 100) -> str:
     return "\n".join(clip(line, width) for line in lines) + "\n"
 
 
+def _dump(doc) -> str:
+    return json.dumps(finite_copy(doc), indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
+def _snapshot_doc(snap: Snapshot) -> dict:
+    """Snapshot as plain dicts. asdict only sees the fixed-shape rows; the free-form host,
+    quota and gpu values (untrusted nesting) are copied by the iterative finite_copy instead."""
+    shell = dataclasses.replace(
+        snap,
+        host={},
+        quota={},
+        llm=None if snap.llm is None else dataclasses.replace(snap.llm, gpu={}),
+    )
+    doc = asdict(shell)
+    doc["host"] = finite_copy(snap.host)
+    doc["quota"] = finite_copy(snap.quota)
+    if snap.llm is not None:
+        doc["llm"]["gpu"] = finite_copy(snap.llm.gpu)
+    return doc
+
+
 def format_json(snap: Snapshot | None, now: float) -> str:
     """Snapshot as JSON (sorted keys, indent 2) with status and age added at the top level."""
     status, age = snapshot_status(snap, now)
     if snap is None:
-        return json.dumps({"status": status}, indent=2, sort_keys=True) + "\n"
-    doc = asdict(snap)
+        return _dump({"status": status})
+    doc = _snapshot_doc(snap)
     doc["status"] = status
     doc["age_s"] = age
-    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+    return _dump(doc)
 
 
 def format_sessions(views: Views) -> str:
