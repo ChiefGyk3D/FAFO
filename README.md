@@ -98,4 +98,6 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
 Status: early development. See `docs/superpowers/specs/` for the design and
 `docs/superpowers/plans/` for the implementation plan.
 
+Contributing and review process: see `CONTRIBUTING.md`.
+
 License: Apache-2.0. Security reports: see `SECURITY.md`.
