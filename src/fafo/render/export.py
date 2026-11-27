@@ -95,9 +95,14 @@ def views_to_dict(
     doc["age_s"] = _finite(views.age_s)
     for node in doc["sessions"]:
         node["is_current"] = False
+        # The summary (collapsed, collapsed_names) stays; the folded rows are TUI-only.
+        node.pop("helpers", None)
+        node.pop("helpers_hidden", None)
     for group in doc["unattached"]:
         for node in group["sessions"]:
             node["is_current"] = False
+            node.pop("helpers", None)
+            node.pop("helpers_hidden", None)
     gen = _finite(time.time() if generated is None else generated)
     index, count = build_session_index(views, snapshot)
     return {

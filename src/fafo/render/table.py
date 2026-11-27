@@ -14,6 +14,7 @@ from .view import (
     SessionNode,
     Views,
     age_text,
+    helper_summary,
     snapshot_status,
 )
 
@@ -169,6 +170,8 @@ def format_table(views: Views, width: int = 100) -> str:
         for n in views.sessions:
             items.append(_session_row(n))
             items += [_proc_row(c, 2) for c in n.children]
+            if n.collapsed:
+                items.append("    " + helper_summary(n.collapsed, n.collapsed_names))
             if n.children_hidden:
                 items.append(f"    +{n.children_hidden} more processes")
         if views.sessions_hidden:

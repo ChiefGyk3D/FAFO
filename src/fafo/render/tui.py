@@ -37,10 +37,12 @@ from textual.widgets import Input, Static
 from ..redact import sanitize_text
 from .view import (
     Group,
+    HelperPolicy,
     ProcNode,
     SessionNode,
     Views,
     age_text,
+    helper_summary,
     read_views,
 )
 
@@ -71,14 +73,18 @@ MIN_W = 60
 MIN_H = 12
 GAP = 2
 MAX_STATUS = 160
+MAX_EXPANDED = 256  # sessions whose helper rows are shown; the oldest toggle drops first
 REFRESH_MIN = 0.25
 REFRESH_MAX = 30.0
 
 KEYS_LONG = (
     "q quit  Tab/S-Tab view  1-6 jump  j/k move  PgUp/PgDn page  g/G ends  "
-    "/ filter  Enter open  Esc back  Space fold  p pause"
+    "/ filter  Enter open  Esc back  Space fold  x helpers  p pause"
 )
-KEYS_MID = "q quit  Tab view  1-6 jump  j/k move  g/G ends  / filter  Enter open  Esc back  p pause"
+KEYS_MID = (
+    "q quit  Tab view  1-6 jump  j/k move  g/G ends  / filter  Enter open  Esc back  "
+    "x helpers  p pause"
+)
 KEYS_SHORT = "q quit  Tab view  / filter  Enter open  Esc back  p pause"
 
 TWISTY_OPEN = "▾"
@@ -269,7 +275,14 @@ def _group_procs(g: Group, needle: str) -> list[ProcNode]:
     return [p for p in g.procs if not needle or needle in g.name.lower() or needle in p.agent.lower()]
 
 
-def build_sessions_page(views: Views, collapsed: set, needle: str) -> Page:
+def _helper_text(node: SessionNode, open_: bool) -> str:
+    text = helper_summary(node.collapsed, node.collapsed_names)
+    return f"{text} (shown, x hides)" if open_ else f"{text} (x shows)"
+
+
+def build_sessions_page(
+    views: Views, collapsed: set, needle: str, expanded: frozenset | set = frozenset()
+) -> Page:
     items: list[Item] = []
     add = items.append
     for node in views.sessions:
@@ -283,6 +296,15 @@ def build_sessions_page(views: Views, collapsed: set, needle: str) -> Page:
                 add(Item("child", ("c", sid, ch.pid), ch, node))
             if node.children_hidden:
                 add(Item("more", ("m", sid), f"+{node.children_hidden} more not shown", node))
+            if node.collapsed:
+                shown = sid in expanded
+                add(Item("helpers", ("h", sid), _helper_text(node, shown), node))
+                if shown:
+                    for ch in node.helpers:
+                        add(Item("child", ("c", sid, ch.pid), ch, node))
+                    if node.helpers_hidden:
+                        add(Item("more", ("mh", sid), f"+{node.helpers_hidden} more not shown",
+                                 node))
     if views.sessions_hidden and not needle:
         add(Item("more", ("m", "sessions"), f"+{views.sessions_hidden} more sessions not shown"))
     for g in views.unattached:
@@ -303,7 +325,7 @@ def build_sessions_page(views: Views, collapsed: set, needle: str) -> Page:
     def cells(it: Item) -> tuple[str, dict[str, Cell], bool]:
         if it.kind == "sess":
             node = it.a
-            kids = len(node.children) + node.children_hidden
+            kids = len(node.children) + node.children_hidden + node.collapsed
             tw = (TWISTY_OPEN if it.b else TWISTY_SHUT) + " "
             mark = MARK_HERE if node.is_current else " "
             return mark, _session_cells(node, tw, kids), node.is_current
@@ -314,7 +336,9 @@ def build_sessions_page(views: Views, collapsed: set, needle: str) -> Page:
     return Page(SESSION_COLS, items, cells, "no sessions")
 
 
-def build_procs_page(views: Views, needle: str) -> Page:
+def build_procs_page(
+    views: Views, needle: str, expanded: frozenset | set = frozenset()
+) -> Page:
     items: list[Item] = []
     add = items.append
     for node in views.sessions:
@@ -325,6 +349,13 @@ def build_procs_page(views: Views, needle: str) -> Page:
             add(Item("proc", ("p", ch.pid, node.session_id), ch, _label(node)))
         if node.children_hidden:
             add(Item("more", ("m", node.session_id), f"+{node.children_hidden} more not shown"))
+        if node.collapsed:
+            if node.session_id in expanded:
+                for ch in node.helpers:
+                    add(Item("proc", ("p", ch.pid, node.session_id), ch, _label(node)))
+            else:
+                add(Item("more", ("mc", node.session_id),
+                         helper_summary(node.collapsed, node.collapsed_names)))
     for g in views.unattached:
         for p in _group_procs(g, needle):
             add(Item("proc", ("p", p.pid, g.name), p, "-"))
@@ -455,15 +486,16 @@ def build_drill_page(views: Views, sid: str | None, width: int) -> Page:
         kv("branch", node.branch or "-")
         kv("elapsed", f"{node.elapsed}   cpu {node.cpu}   mem {node.rss}")
         lines.append(("", "fg"))
-        total = len(node.children) + node.children_hidden
+        total = len(node.children) + node.children_hidden + node.collapsed
         lines.append((f"children ({total})", "head"))
-        for ch in node.children:
+        for ch in [*node.children, *node.helpers]:
             lines.append((f"  {ch.pid:>8}  {ch.agent:<8}  cpu {ch.cpu:>4}  mem {ch.rss:>5}",
                           "stale" if ch.stale else "fg"))
             for chunk in _wrap(ch.cmd, width - 6):
                 lines.append((f"      {chunk}", "idle"))
-        if node.children_hidden:
-            lines.append((f"  +{node.children_hidden} more not shown", "waiting"))
+        if node.children_hidden or node.helpers_hidden:
+            n = node.children_hidden + node.helpers_hidden
+            lines.append((f"  +{n} more not shown", "waiting"))
     items = [Item("line", ("l", i), t, c) for i, (t, c) in enumerate(lines)]
     return Page([], items, None, "")
 
@@ -502,6 +534,16 @@ class Body(Widget, can_focus=True):
 class UiState:
     collapsed: set = field(default_factory=set)
     needle: str = ""
+    # session ids whose helper rows are shown; insertion ordered, bounded by MAX_EXPANDED
+    expanded: dict = field(default_factory=dict)
+
+    def toggle_expanded(self, sid: str) -> None:
+        if sid in self.expanded:
+            del self.expanded[sid]
+            return
+        self.expanded[sid] = None
+        while len(self.expanded) > MAX_EXPANDED:
+            del self.expanded[next(iter(self.expanded))]
 
 
 class FafoApp(App[int]):
@@ -540,14 +582,16 @@ class FafoApp(App[int]):
         Binding("enter", "open", "open", show=False),
         Binding("escape", "back", "back", show=False),
         Binding("space", "toggle", "fold", show=False),
+        Binding("x", "helpers", "helpers", show=False),
         Binding("right", "expand(1)", "expand", show=False),
         Binding("left", "expand(0)", "collapse", show=False),
         Binding("p", "pause", "pause", show=False),
     ]
 
     def __init__(self, snapshot_path: Path, session_id: str | None = None,
-                 refresh_s: float = 1.0) -> None:
+                 refresh_s: float = 1.0, helpers: HelperPolicy | None = None) -> None:
         super().__init__()
+        self.helpers = helpers
         self.snapshot_path = Path(snapshot_path)
         self.session_id = session_id
         self.refresh_s = refresh_s
@@ -646,7 +690,10 @@ class FafoApp(App[int]):
                 changed = False
                 sig = None
                 try:
-                    views = read_views(self.snapshot_path, now, current_session_id=self.session_id)
+                    views = read_views(
+                        self.snapshot_path, now, current_session_id=self.session_id,
+                        helpers=self.helpers,
+                    )
                     if views.age_s is None:
                         error = "snapshot missing or unreadable"
                     else:
@@ -712,9 +759,9 @@ class FafoApp(App[int]):
         needle = self.state.needle
         i = self.view_idx
         if i == V_SESSIONS:
-            return build_sessions_page(v, self.state.collapsed, needle)
+            return build_sessions_page(v, self.state.collapsed, needle, self.state.expanded)
         if i == V_PROCS:
-            return build_procs_page(v, needle)
+            return build_procs_page(v, needle, self.state.expanded)
         if i == V_LLM:
             return build_llm_page(v, needle)
         if i == V_RUNNERS:
@@ -822,9 +869,11 @@ class FafoApp(App[int]):
         bg = "sel_bg" if selected else "bg"
         t = new_text()
         kind = it.kind
-        if kind in ("head", "more", "line"):
+        if kind in ("head", "more", "line", "helpers"):
             if kind == "head":
                 color, prefix = "head", (TWISTY_OPEN if it.b else TWISTY_SHUT) + " "
+            elif kind == "helpers":
+                color, prefix = "idle", "     └─ "
             elif kind == "more":
                 color, prefix = "waiting", "  "
             else:
@@ -1058,6 +1107,8 @@ class FafoApp(App[int]):
         it = self.page.items[self.sel_idx]
         if it.kind in ("sess", "gsess"):
             return it.a.session_id
+        if it.kind == "helpers":
+            return it.b.session_id
         if it.kind == "child":
             return it.b.session_id
         if it.kind == "proc" and isinstance(it.a, SessionNode):
@@ -1076,6 +1127,9 @@ class FafoApp(App[int]):
             if it.kind == "head":
                 self._toggle_key(it.key[1], None)
                 return
+            if it.kind == "helpers":
+                self._toggle_helpers(it.b.session_id)
+                return
             sid = self._selected_session_id()
             if sid is None:
                 return
@@ -1093,6 +1147,30 @@ class FafoApp(App[int]):
         else:
             col.add(name)
         self._rebuild()
+
+    def _toggle_helpers(self, sid: str) -> None:
+        self.state.toggle_expanded(sid)
+        self._rebuild()
+
+    def action_helpers(self) -> None:
+        def go() -> None:
+            if self.view_idx not in (V_SESSIONS, V_PROCS) or not self.page.items:
+                return
+            it = self.page.items[self.sel_idx]
+            node = None
+            if it.kind == "sess":
+                node = it.a
+            elif it.kind in ("child", "more", "helpers") and isinstance(it.b, SessionNode):
+                node = it.b
+            elif it.kind == "proc" and isinstance(it.a, SessionNode):
+                node = it.a
+            elif it.kind == "proc":
+                node = next((n for n in self.views.sessions if n.session_id == it.key[2]), None)
+            elif it.kind == "more":
+                node = next((n for n in self.views.sessions if n.session_id == it.key[1]), None)
+            if node is not None and node.collapsed:
+                self._toggle_helpers(node.session_id)
+        self._safe_call(go)
 
     def action_toggle(self) -> None:
         self._safe_call(lambda: self._fold(None))
@@ -1127,8 +1205,13 @@ class FafoApp(App[int]):
 # ---- entry points --------------------------------------------------------------------------------
 
 
-def run_tui(snapshot_path: Path, session_id: str | None = None, refresh_s: float = 1.0) -> int:
-    app = FafoApp(Path(snapshot_path), session_id=session_id, refresh_s=refresh_s)
+def run_tui(
+    snapshot_path: Path,
+    session_id: str | None = None,
+    refresh_s: float = 1.0,
+    helpers: HelperPolicy | None = None,
+) -> int:
+    app = FafoApp(Path(snapshot_path), session_id=session_id, refresh_s=refresh_s, helpers=helpers)
     code = app.run()
     return int(code) if isinstance(code, int) else 0
 

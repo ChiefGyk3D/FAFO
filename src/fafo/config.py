@@ -19,7 +19,15 @@ DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
-TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
+TOP_KEYS = {
+    "snapshot_path", "show_args", "sources", "aliases", "collapse_helpers", "boring_procs",
+}
+DEFAULT_BORING_PROCS = (
+    "sleep", "tail", "bash", "sh", "zsh", "dash", "cat", "head", "wc", "grep", "timeout",
+    "env", "true",
+)
+MAX_BORING = 64
+_PROC_NAME = re.compile(r"[A-Za-z0-9._-]{1,32}")
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
 SECRET_WORDS = ("token", "password", "secret", "key")
 
@@ -59,6 +67,8 @@ class Config:
     aliases: dict[str, str]
     snapshot_path: Path
     show_args: set[str]
+    collapse_helpers: bool = True
+    boring_procs: tuple[str, ...] = DEFAULT_BORING_PROCS
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
     _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
@@ -295,6 +305,22 @@ def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
     return lowered
 
 
+def _parse_helpers(data: dict) -> tuple[bool, tuple[str, ...]]:
+    collapse = data.get("collapse_helpers", True)
+    if not isinstance(collapse, bool):
+        raise _bad("collapse_helpers", "must be true or false")
+    raw = data.get("boring_procs", list(DEFAULT_BORING_PROCS))
+    if not isinstance(raw, list) or len(raw) > MAX_BORING:
+        raise _bad("boring_procs", f"must be a list of at most {MAX_BORING} program names")
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or _PROC_NAME.fullmatch(item) is None:
+            raise _bad("boring_procs", "must contain only names of 1-32 characters from A-Z a-z 0-9 . _ -")
+        if item not in names:
+            names.append(item)
+    return collapse, tuple(names)
+
+
 def load_config(path: Path | None) -> Config:
     data: dict = {}
     if path is not None:
@@ -323,6 +349,8 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
 
+    collapse_helpers, boring_procs = _parse_helpers(data)
+
     snap = data.get("snapshot_path")
     if snap is None:
         snapshot_path = _default_snapshot_path()
@@ -336,6 +364,8 @@ def load_config(path: Path | None) -> Config:
         aliases=dict(aliases),
         snapshot_path=snapshot_path,
         show_args=set(show),
+        collapse_helpers=collapse_helpers,
+        boring_procs=boring_procs,
         _alias_re=_compile_aliases(aliases),
         _alias_map=alias_map,
     )

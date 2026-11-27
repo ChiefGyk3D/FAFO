@@ -665,7 +665,9 @@ def test_parse_args_validates_refresh_range():
 
 def test_entry_point_signatures():
     sig = inspect.signature(tui.run_tui)
-    assert list(sig.parameters) == ["snapshot_path", "session_id", "refresh_s"]
+    assert list(sig.parameters) == [
+        "snapshot_path", "session_id", "refresh_s", "helpers",  # helpers: FAFO#69
+    ]
     assert sig.parameters["session_id"].default is None
     assert sig.parameters["refresh_s"].default == 1.0
     assert list(inspect.signature(tui.main).parameters) == ["argv"]

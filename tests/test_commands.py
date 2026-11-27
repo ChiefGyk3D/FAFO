@@ -130,7 +130,7 @@ def fake_tui(monkeypatch, result=0):
     calls = []
     mod = types.ModuleType("fafo.render.tui")
 
-    def run_tui(path, session_id=None, refresh_s=1.0):
+    def run_tui(path, session_id=None, refresh_s=1.0, helpers=None):
         calls.append((Path(path), session_id, refresh_s))
         return result
 
