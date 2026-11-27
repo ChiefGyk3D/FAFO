@@ -3,7 +3,7 @@
 // trusts it: shapes are checked, rows that are malformed are dropped, strings are
 // stripped of control characters and escape sequences and capped.
 
-export const SCHEMA = 2
+export const SCHEMAS: readonly number[] = [2, 3]
 export const MAX_BYTES = 2 * 1024 * 1024
 export const MAX_SESSIONS = 200
 export const MAX_CHILDREN = 256
@@ -130,6 +130,8 @@ export type Views = {
   runners: Runner[]
   quota: string[]
   index: IndexRow[]
+  indexTruncated: boolean
+  indexHidden: number
 }
 
 function child(o: Record<string, unknown>): Child {
@@ -179,7 +181,7 @@ export function parseViews(text: string): ParseResult {
   }
   const top = obj(doc)
   if (!top) return { ok: false, kind: 'shape', schema: '' }
-  if (top.schema !== SCHEMA) {
+  if (typeof top.schema !== 'number' || !SCHEMAS.includes(top.schema)) {
     const raw = typeof top.schema === 'number' ? String(top.schema) : '?'
     return { ok: false, kind: 'schema', schema: clean(raw, 12) }
   }
@@ -232,6 +234,12 @@ export function parseViews(text: string): ParseResult {
     quota: rows(top.quota, MAX_LIST)
       .map(q => `${clean(q.name, 24)} ${clean(q.text, 60)}`.trim())
       .filter(s => s !== ''),
+    indexTruncated: top.session_index_truncated === true,
+    indexHidden: Math.max(
+      0,
+      Math.floor(num(top.index_hidden) ?? 0) ||
+        Math.floor((num(top.session_index_count) ?? 0) - rows(top.session_index, MAX_INDEX).length),
+    ),
     index: rows(top.session_index, MAX_INDEX).map(r => ({
       sessionId: clean(r.session_id, 80),
       name: clean(r.name, 60),

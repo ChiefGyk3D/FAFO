@@ -242,7 +242,9 @@ export function buildLines(shown: Shown, w: number, rowsMax: number): Line[] {
     const text = `you are here: ${found.name || '?'} | ${found.project || '?'} | ${found.task || '?'} | pid ${pid} | ${found.state || '?'}`
     head.push({ text: fit(text, w), bold: true, color: 'claude' })
   } else {
-    head.push({ text: fit('unknown session', w), bold: true, dim: true })
+    const note =
+      views && views.indexTruncated ? ` (index truncated, ${views.indexHidden} hidden)` : ''
+    head.push({ text: fit('unknown session' + note, w), bold: true, dim: true })
   }
 
   if (!views) {

@@ -306,12 +306,33 @@ test('status no-collector from the file says collector not running', async ($, o
 
 test('a schema other than 2 is named and the last good stays', async ($, on) => {
   const { ctl, clock } = await load($, on, views({ sessions: [node(1, OWN_NODE)] }))
-  ctl.file.value = JSON.stringify({ ...views(), schema: 3 })
+  ctl.file.value = JSON.stringify({ ...views(), schema: 4 })
   await clock.advance(2000)
   const ui = await draw($, 120)
   const all = await lines(ui)
-  expect(all.some(t => t.startsWith('views.json schema 3 not supported (need 2)'))).toBe(true)
+  expect(all.some(t => t.startsWith('views.json schema 4 not supported (need 2 or 3)'))).toBe(true)
   expect(all[0]).toBe(OWN_BANNER)
+  await ui.unmount()
+})
+
+test('schema 3 is accepted', async ($, on) => {
+  await load($, on, views({ schema: 3, sessions: [node(1, OWN_NODE)] }))
+  const ui = await draw($, 120)
+  expect((await lines(ui))[0]).toBe(OWN_BANNER)
+  await ui.unmount()
+})
+
+test('unknown session names a truncated index and how many entries are hidden', async ($, on) => {
+  await load($, on, views({ session_index: [], session_index_truncated: true, index_hidden: 12, session_index_count: 12 }))
+  const ui = await draw($, 120)
+  expect((await lines(ui))[0]).toBe('unknown session (index truncated, 12 hidden)')
+  await ui.unmount()
+})
+
+test('unknown session stays exact when the index is not truncated', async ($, on) => {
+  await load($, on, views({ session_index: [], session_index_truncated: false, index_hidden: 0 }))
+  const ui = await draw($, 120)
+  expect((await lines(ui))[0]).toBe('unknown session')
   await ui.unmount()
 })
 

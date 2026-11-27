@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { buildLines } from './layout'
 import type { Shown } from './layout'
-import { MAX_BYTES, SCHEMA, clean, parseViews } from './views'
+import { MAX_BYTES, clean, parseViews } from './views'
 import type { Views } from './views'
 
 const PANE = 'fafo'
@@ -76,7 +76,7 @@ async function readOnce($: EngineInterface): Promise<void> {
     state.goodAtMs = await $.clock.now()
     state.note = null
   } else if (parsed.kind === 'schema') {
-    state.note = failure(`schema ${parsed.schema} not supported (need ${SCHEMA})`)
+    state.note = failure(`schema ${parsed.schema} not supported (need 2 or 3)`)
   } else {
     state.note = failure(parsed.kind === 'parse' ? 'is not valid JSON' : 'has the wrong shape')
   }

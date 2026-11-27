@@ -18,7 +18,7 @@ by the mod seats from 144 columns; below that, run `/fafo` once to seat it at an
 
 ## What it reads
 
-`views.json`, schema 2, written atomically by the FAFO collector next to its snapshot
+`views.json`, schema 2 or 3 (any other number is refused), written atomically by the FAFO collector next to its snapshot
 (`fafo.render.export.write_views`). Every 2 seconds the mod does one bounded text read
 (at most 2 MiB, one read in flight at a time) and stops when the pane closes.
 
@@ -38,7 +38,7 @@ in the pane.
 
 - Top line: `you are here: <name> | <project> | <task> | pid <pid> | <state>`, found by the
   session id from `$.session.id()` in `sessions` (then `session_index`). No match shows
-  exactly `unknown session`.
+  exactly `unknown session`, or `unknown session (index truncated, N hidden)` when the file says its session index was cut.
 - A health line (per source status and age), then host load.
 - Sessions, the current one first and marked `>`, each with its commands indented under it,
   then unattached groups, then LLM, runners and quota when there is room. Stale rows are
@@ -48,7 +48,7 @@ in the pane.
 
 ## It never blanks
 
-A missing file, read error, bad JSON, wrong shape, oversized file or schema other than 2
+A missing file, read error, bad JSON, wrong shape, oversized file or schema other than 2 or 3
 keeps the last good view on screen with a one line note and its age. With no good read yet
 it shows `collector not running`. A file whose `generated` time is over 60 seconds old shows
 `collector not running (last update Ns ago)` over dimmed rows.
