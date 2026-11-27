@@ -48,9 +48,12 @@ the display half of `safo agents-status`.
   its own session id (`$.session.id()`, verified in the mod API types of
   Claude Code 2.1.332) and pins a banner at the very top: this session's
   name, project, task, PID and state. Its row in the session list is
-  highlighted and marked. The standalone TUI takes `--session <id>` or reads
-  the id from the environment of the shell it is launched from, and marks
-  that row the same way. A session with no match shows "unknown session",
+  highlighted and marked. The standalone TUI takes `--session ID`, or
+  `--session auto`, which walks up the process tree from the command to the
+  nearest ancestor whose pid is a registered Claude session in the snapshot
+  (capped at 64 hops; no match means no banner). `auto` only works inside a
+  terminal started from a Claude session. Either form marks that row the
+  same way. A session with no match shows "unknown session",
   never a guess. Whether the terminal tab title can also be set is not
   verified (not found in the mod API); treated as a later spike.
 - Session addresses for manual cross-session messaging (owner request
