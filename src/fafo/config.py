@@ -12,6 +12,7 @@ from pathlib import Path
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
 DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
+MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
 TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
@@ -72,9 +73,14 @@ def _check_secrets(data: dict, where: str = "", word_split: bool = False) -> Non
 
 def _positive_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{name} must be a positive number, got {value!r}")
-    if not math.isfinite(value) or value <= 0:
-        raise ConfigError(f"{name} must be a positive number, got {value!r}")
+        raise ConfigError(f"{name} must be a positive number, got {str(value)[:40]!r}")
+    # Compare without converting: a huge TOML integer overflows float().
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ConfigError(f"{name} must be a positive finite number")
+    if value <= 0:
+        raise ConfigError(f"{name} must be a positive number")
+    if value > MAX_SECONDS:
+        raise ConfigError(f"{name} must be at most {MAX_SECONDS} seconds")
     return value
 
 

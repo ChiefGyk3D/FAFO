@@ -198,3 +198,15 @@ def test_alias_lookup_miss_yields_placeholder_not_raw_text(tmp_path):
     cfg = load_config(write(tmp_path, '[aliases]\n"h.invalid" = "x"\n'))
     object.__setattr__(cfg, "_alias_map", {})
     assert cfg.alias("see h.invalid") == "see <host>"
+
+
+@pytest.mark.parametrize("field", ["interval_s", "timeout_s"])
+@pytest.mark.parametrize("huge", ["1" + "0" * 1000, "-1" + "0" * 1000, "86401", "1e300"])
+def test_huge_interval_or_timeout_is_config_error(tmp_path, field, huge):
+    with pytest.raises(ConfigError, match=field):
+        load_config(write(tmp_path, f"[sources.host]\n{field} = {huge}\n"))
+
+
+def test_interval_at_cap_accepted(tmp_path):
+    cfg = load_config(write(tmp_path, "[sources.host]\ninterval_s = 86400\n"))
+    assert cfg.sources["host"].interval_s == 86400
