@@ -52,6 +52,10 @@ class GhError(Exception):
     """Any client failure. The message never contains the token or response text."""
 
 
+class GhArgError(GhError, ValueError):
+    """A caller argument (repo, status, run id) failed validation; nothing was sent."""
+
+
 class RateLimited(GhError):
     def __init__(self, not_before: float) -> None:
         super().__init__("github rate limited; not retrying until the not-before time")
@@ -156,15 +160,15 @@ class GhClient:
 
     def runs(self, repo: str, status: str) -> list[dict]:
         self._check_repo(repo)
-        if status not in _STATUSES:
-            raise ValueError("invalid run status")
+        if not isinstance(status, str) or status not in _STATUSES:
+            raise GhArgError("invalid run status")
         path = f"/repos/{repo}/actions/runs?status={status}&per_page={PER_PAGE}"
         return self._get(path, "workflow_runs")
 
     def jobs(self, repo: str, run_id: int) -> list[dict]:
         self._check_repo(repo)
         if type(run_id) is not int or run_id < 0:
-            raise ValueError("invalid run id")
+            raise GhArgError("invalid run id")
         path = f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"
         return self._get(path, "jobs")
 
@@ -173,7 +177,7 @@ class GhClient:
     @staticmethod
     def _check_repo(repo: str) -> None:
         if not isinstance(repo, str) or not _REPO.fullmatch(repo) or ".." in repo:
-            raise ValueError("repo must be owner/name")
+            raise GhArgError("repo must be owner/name")
 
     def _set_not_before(self, headers: Mapping[str, str], now: float) -> float:
         retry = _num(headers.get("retry-after", ""))

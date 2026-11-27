@@ -265,3 +265,11 @@ def test_request_budget_counter_and_text():
     c.runs("o/r", "queued")
     assert c.requests_made == 1
     assert "1" in c.budget_text() and "4321" in c.budget_text()
+
+
+@pytest.mark.parametrize("status", [[], None, 5, {}, b"queued"])
+def test_non_string_status_is_a_client_error_not_typeerror(status):
+    http = FakeHttp(ok(RUNS))
+    with pytest.raises(GhError):
+        client(http).runs("o/r", status)
+    assert http.calls == []

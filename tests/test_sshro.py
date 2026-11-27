@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import stat
 import subprocess
 import threading
@@ -80,7 +81,9 @@ def test_every_op_is_one_fixed_string():
     for op, cmd in OPS.items():
         argv = build_argv(SshHost(alias="runner-a"), op)
         assert argv[-1] == cmd
-    assert "Runner.Worker|Runner.Listener" in OPS["workers"]
+    # bracket trick: the pattern must not match the grep process's own command line
+    assert "'[R]unner.Worker|[R]unner.Listener'" in OPS["workers"]
+    assert "Runner.Worker|Runner.Listener" not in OPS["workers"]
 
 
 def test_env_is_minimal(monkeypatch):
@@ -170,3 +173,35 @@ def test_workers_no_match_is_empty_not_error():
     assert ssh_ro(HOST, "workers", runner=Fake(rc=1, out=b"")) == ""
     with pytest.raises(SshError):
         ssh_ro(HOST, "df", runner=Fake(rc=1, out=b""))
+
+
+def test_grep_pattern_cannot_match_its_own_command_line():
+    import re
+
+    cmd = OPS["workers"]
+    pattern = cmd.split("grep -E ")[1].strip("'")
+    self_line = f"grep -E '{pattern}'"
+    assert re.search(pattern, self_line) is None
+
+
+def test_normal_exit_sends_no_signal(tmp_path, monkeypatch):
+    sent: list[tuple] = []
+    monkeypatch.setattr("fafo.sshro.os.killpg", lambda *a: sent.append(a))
+    script = _script(tmp_path, "echo hi\n")
+    assert default_runner([str(script)], 5.0, {"PATH": os.environ["PATH"]}) == (0, b"hi\n")
+    assert sent == []
+
+
+def test_hung_child_gets_group_sigkill_before_reap(tmp_path, monkeypatch):
+    sent: list[tuple] = []
+    real = os.killpg
+
+    def spy(pgid, sig):
+        sent.append((pgid, sig))
+        real(pgid, sig)
+
+    monkeypatch.setattr("fafo.sshro.os.killpg", spy)
+    script = _script(tmp_path, "sleep 30 &\nwait\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        default_runner([str(script)], 0.5, {"PATH": os.environ["PATH"]})
+    assert len(sent) == 1 and sent[0][1] == signal.SIGKILL

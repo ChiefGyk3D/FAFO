@@ -13,6 +13,7 @@ Row state: busy (an in-progress job matched, or a Runner.Worker process is runni
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,20 +61,33 @@ def _epoch(value: object) -> float | None:
     return dt.timestamp()
 
 
+def _valid_step(step: object) -> bool:
+    """A step is usable only if its number is a real int (not bool) >= 0."""
+    if not isinstance(step, dict):
+        return False
+    n = step.get("number")
+    return type(n) is int and n >= 0
+
+
 def _step_info(job: dict) -> tuple[str, int, int]:
-    steps = job.get("steps")
-    if not isinstance(steps, list):
+    raw = job.get("steps")
+    if not isinstance(raw, list):
         return "", 0, 0
-    steps = [s for s in steps if isinstance(s, dict)]
-    for i, s in enumerate(steps, 1):
+    steps = [s for s in raw if _valid_step(s)]
+    for s in steps:
         if s.get("status") != "completed":
-            n = s.get("number")
-            return _txt(s.get("name")), n if type(n) is int else i, len(steps)
+            return _txt(s.get("name")), s["number"], len(steps)
     return "", 0, len(steps)
 
 
+def _finite(value: float) -> float:
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("non-finite or negative metric")
+    return value
+
+
 def _parse_load(text: str) -> float:
-    return float(text.split()[0])
+    return _finite(float(text.split()[0]))
 
 
 def _parse_mem(text: str) -> float:
@@ -85,12 +99,30 @@ def _parse_mem(text: str) -> float:
     total, avail = vals["MemTotal"], vals["MemAvailable"]
     if total <= 0:
         raise ValueError("no memory total")
-    return round(100.0 * (1 - min(avail, total) / total), 1)
+    return _finite(round(100.0 * (1 - min(avail, total) / total), 1))
 
 
 def _parse_disk(text: str) -> float:
     cols = text.strip().splitlines()[-1].split()
-    return float(cols[4].rstrip("%"))
+    return _finite(float(cols[4].rstrip("%")))
+
+
+def _scan_procs(text: str) -> tuple[bool, bool]:
+    """(listener, worker) from `ps -eo pid,etimes,comm,args` lines, judged by the comm column.
+
+    ps, grep and shell lines that merely mention the runner names are never counted.
+    """
+    listener = worker = False
+    for line in text.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        comm = parts[2]
+        if comm == "Runner.Listener":
+            listener = True
+        elif comm == "Runner.Worker":
+            worker = True
+    return listener, worker
 
 
 class RunnersSource:
@@ -139,12 +171,14 @@ class RunnersSource:
             mem = _parse_mem(self._ssh(host.ssh, "meminfo"))
             disk = _parse_disk(self._ssh(host.ssh, "df"))
             procs = self._ssh(host.ssh, "workers")
-            listener = "Runner.Listener" in procs
-            worker = "Runner.Worker" in procs
+            listener, worker = _scan_procs(procs)
         except SshError as exc:
             notes.append(f"{_txt(host.name)}: ssh {_txt(str(exc))}")
         except (ValueError, KeyError, IndexError):
             notes.append(f"{_txt(host.name)}: ssh output not understood")
+        if notes and notes[-1].startswith(f"{_txt(host.name)}:"):
+            load = mem = disk = UNKNOWN
+            listener, worker = None, False
         return load, mem, disk, listener, worker
 
     # -- collect -----------------------------------------------------------------------------

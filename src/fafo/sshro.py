@@ -29,7 +29,7 @@ OPS: dict[str, str] = {
     "loadavg": "cat /proc/loadavg",
     "meminfo": "cat /proc/meminfo",
     "df": "df -P -k /",
-    "workers": "ps -eo pid,etimes,comm,args --no-headers | grep -E 'Runner.Worker|Runner.Listener'",
+    "workers": "ps -eo pid,etimes,comm,args --no-headers | grep -E '[R]unner.Worker|[R]unner.Listener'",
 }
 
 _BASE_ARGV = (
@@ -128,10 +128,13 @@ def default_runner(argv: Sequence[str], timeout_s: float, env: Mapping[str, str]
         rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         return rc, bytes(buf)
     finally:
-        try:  # before reaping, so the group id cannot have been reused
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        # Kill the group only while the child is still running (not yet reaped), so a reused
+        # pid can never receive the signal. After a normal exit nothing is signalled.
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if proc.stdout is not None:
             proc.stdout.close()
         try:

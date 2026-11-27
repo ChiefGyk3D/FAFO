@@ -221,3 +221,81 @@ def test_garbage_job_fields_do_not_crash():
 def test_gh_none_still_reports_host_state():
     (r,) = collect(RunnersSource(cfg(), None, ssh=good_ssh)).runners
     assert r.state == "idle" and r.load == pytest.approx(0.5)
+
+
+def _busy(job_steps):
+    gh = FakeGh({("o/r", "in_progress"): [run_of(1)]}, {("o/r", 1): [job(st=job_steps)]})
+    (r,) = collect(RunnersSource(cfg(), gh)).runners
+    return r
+
+
+def test_invalid_step_numbers_are_ignored_at_the_parse_boundary():
+    st = [
+        {"name": "a", "status": "completed", "number": 1},
+        {"name": "neg", "status": "in_progress", "number": -1},
+        {"name": "bool", "status": "queued", "number": True},
+        {"name": "str", "status": "queued", "number": "3"},
+        {"name": "float", "status": "queued", "number": 2.5},
+        {"name": "none", "status": "queued"},
+        {"name": "e", "status": "queued", "number": 3},
+    ]
+    r = _busy(st)
+    assert (r.step, r.step_n, r.step_total) == ("e", 3, 2)
+    assert r.step_n >= 0
+
+
+def test_all_steps_invalid_gives_empty_step():
+    r = _busy([{"name": "x", "status": "in_progress", "number": -5}])
+    assert (r.step, r.step_n, r.step_total) == ("", 0, 0)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"loadavg": "nan 0 0 1/2 3\n"},
+        {"loadavg": "inf 0 0 1/2 3\n"},
+        {"loadavg": "-1.0 0 0 1/2 3\n"},
+        {"df": "Filesystem 1 2 3 Capacity M\n/dev/x 1 2 3 nan% /\n"},
+        {"df": "Filesystem 1 2 3 Capacity M\n/dev/x 1 2 3 inf% /\n"},
+        {"meminfo": "MemTotal: 0 kB\nMemAvailable: 0 kB\n"},
+    ],
+)
+def test_non_finite_ssh_values_are_a_parse_failure(bad):
+    def ssh(host, op, timeout_s=6.0):
+        return bad.get(op, good_ssh(host, op))
+
+    src = RunnersSource(cfg(), FakeGh(), ssh=ssh)
+    (r,) = collect(src).runners
+    assert (r.load, r.mem, r.disk) == (-1.0, -1.0, -1.0)
+    assert "runner-a" in src.note
+
+
+PS_SELF_ONLY = (
+    " 4321       0 grep            grep -E [R]unner.Worker|[R]unner.Listener\n"
+    " 4320       0 sh              sh -c ps -eo pid | grep -E Runner.Worker|Runner.Listener\n"
+    " 4319       0 ps              ps -eo pid,etimes,comm,args --no-headers\n"
+)
+
+
+def _ssh_with_ps(ps):
+    def ssh(host, op, timeout_s=6.0):
+        return ps if op == "workers" else good_ssh(host, op)
+
+    return ssh
+
+
+def test_ps_self_matches_do_not_count_as_a_listener():
+    (r,) = collect(RunnersSource(cfg(), FakeGh(), ssh=_ssh_with_ps(PS_SELF_ONLY))).runners
+    assert r.state == "down"
+
+
+def test_real_listener_and_worker_lines_are_recognized():
+    ps = PS_SELF_ONLY + (
+        " 100  9000 Runner.Listener /r/bin/Runner.Listener run\n"
+        " 101    50 Runner.Worker   /r/bin/Runner.Worker spawnclient 1 2\n"
+    )
+    (r,) = collect(RunnersSource(cfg(), FakeGh(), ssh=_ssh_with_ps(ps))).runners
+    assert r.state == "busy"
+    ps = PS_SELF_ONLY + " 100  9000 Runner.Listener /r/bin/Runner.Listener run\n"
+    (r,) = collect(RunnersSource(cfg(), FakeGh(), ssh=_ssh_with_ps(ps))).runners
+    assert r.state == "idle"
