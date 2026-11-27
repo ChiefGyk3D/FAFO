@@ -50,10 +50,29 @@ jobs:
       pip-audit-requirements: requirements.txt
       egress-policy: block
 
+  pane-typecheck:
+    name: Pane mod type-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: mods/claude-fafo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Pinned TypeScript from the lockfile (integrity hashes), no install scripts; the API types are the vendored copy.
+      - name: Install the pinned TypeScript
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Type-check the hooks module
+        run: npx --no-install tsc -p .
+
   ci-green:
     name: CI green
     if: always()
-    needs: [ci, security]
+    needs: [ci, security, pane-typecheck]
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
@@ -61,6 +80,7 @@ jobs:
         env:
           CI_RESULT: ${{ needs.ci.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
+          PANE_RESULT: ${{ needs.pane-typecheck.result }}
         run: |
-          echo "ci=$CI_RESULT security=$SECURITY_RESULT"
-          [ "$CI_RESULT" = success ] && [ "$SECURITY_RESULT" = success ]
+          echo "ci=$CI_RESULT security=$SECURITY_RESULT pane-typecheck=$PANE_RESULT"
+          [ "$CI_RESULT" = success ] && [ "$SECURITY_RESULT" = success ] && [ "$PANE_RESULT" = success ]
