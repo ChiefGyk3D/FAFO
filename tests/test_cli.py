@@ -392,3 +392,29 @@ def test_module_entry_missing_config_exit_2(tmp_path):
     assert r.returncode == 2
     assert b"Traceback" not in r.stderr
     assert b"not found" in r.stderr
+
+
+def test_doctor_with_no_config_file_never_raises_config_error(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "DOCTOR_TIMEOUT_S", 5.0)
+    f = {n: (lambda s, c, e, n=n: Stub(n)) for n in ("host", "claude", "codex", "gemini")}
+    code, out, err = run_main(["doctor"], f, capsys)
+    assert code == 0
+    assert [ln.split()[0] for ln in out.splitlines()] == ["host", "claude", "codex", "gemini"]
+    assert "config error" not in err
+
+
+def test_module_doctor_with_no_config_real_sources_exit_matches_health(tmp_path, child_env):
+    env = dict(child_env, HOME=str(tmp_path), XDG_RUNTIME_DIR=str(tmp_path))
+    r = subprocess.run(
+        [sys.executable, "-m", "fafo.cli", "doctor"],
+        capture_output=True,
+        check=False,
+        timeout=60,
+        env=env,
+    )
+    lines = r.stdout.decode().splitlines()
+    assert [ln.split()[0] for ln in lines] == ["host", "claude", "codex", "gemini"]
+    health = {ln.split()[1] for ln in lines}
+    assert health <= {"ok", "absent", "down", "stale"}
+    assert r.returncode == (0 if health <= {"ok", "absent"} else 1)
+    assert b"config error" not in r.stderr and SENTINEL.encode() not in r.stdout + r.stderr

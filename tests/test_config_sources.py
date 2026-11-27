@@ -214,3 +214,72 @@ def test_key_file_is_never_read(tmp_path, monkeypatch):
     body = f'[[sources.runners.hosts]]\nname = "a"\nkey_path = "{key}"\n'
     load_config(write(tmp_path, body))
     assert str(key) not in opened
+
+
+def test_table_without_enabled_key_is_enabled(tmp_path):
+    cfg = load_config(write(tmp_path, '[sources.ollama]\nurl = "http://a.invalid"\n'))
+    assert cfg.sources["ollama"].enabled is True
+    assert cfg.sources["runners"].enabled is False  # not mentioned: stays at its default
+
+
+EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
+
+
+def uncommented_example() -> str:
+    """config.example.toml with the leading '# ' removed inside BEGIN/END example blocks."""
+    out: list[str] = []
+    inside = False
+    blocks = 0
+    for line in EXAMPLE.read_text(encoding="utf-8").splitlines():
+        if line == "#@ BEGIN example":
+            inside = True
+            blocks += 1
+        elif line == "#@ END example":
+            inside = False
+        elif inside and line.startswith("# "):
+            out.append(line[2:])
+        else:
+            out.append(line)
+    assert not inside
+    assert blocks == 3  # ollama, runners, copilot: something was collected
+    return "\n".join(out) + "\n"
+
+
+def test_example_file_loads_as_shipped(tmp_path):
+    cfg = load_config(EXAMPLE)
+    assert {n for n, s in cfg.sources.items() if s.enabled} == {"host", "claude", "codex", "gemini"}
+
+
+def test_example_file_with_every_example_block_loads_and_builds(tmp_path):
+    from fafo.registry import build
+
+    class Stub:
+        def __init__(self, name):
+            self.name = name
+
+        def collect(self, ctx):
+            raise AssertionError("not called")
+
+    cfg = load_config(write(tmp_path, uncommented_example()))
+    assert all(s.enabled for s in cfg.sources.values())
+    assert cfg.sources["ollama"].options["url"].startswith("http://")
+    assert cfg.sources["runners"].options["hosts"][0]["name"] == "runner-a"
+    assert cfg.sources["copilot"].options["repos"] == ["owner/name"]
+    factories = {n: (lambda s, c, e, n=n: Stub(n)) for n in cfg.sources}
+    res = build(cfg, {"FAFO_GITHUB_TOKEN": "x"}, factories=factories)
+    assert sorted(s.name for s in res.sources) == sorted(cfg.sources)
+
+
+def test_example_file_with_real_factories_builds(tmp_path):
+    from fafo.registry import build
+
+    cfg = load_config(write(tmp_path, uncommented_example()))
+    res = build(cfg, {"FAFO_GITHUB_TOKEN": "x"})
+    assert sorted(s.name for s in res.sources) == sorted(cfg.sources)
+
+
+def test_example_file_has_no_secret_values():
+    text = EXAMPLE.read_text(encoding="utf-8")
+    assert "-----" + "BEGIN" not in text
+    assert "ghp_" not in text and "github_pat_" not in text
+    assert chr(0x2014) not in text

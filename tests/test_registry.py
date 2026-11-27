@@ -237,3 +237,31 @@ def test_token_value_not_in_config_error_messages(tmp_path):
     with pytest.raises(ConfigError) as ei:
         build_sources(cfg, {"FAFO_TEST_GH": SENTINEL})
     assert SENTINEL not in str(ei.value)
+
+
+def test_no_config_builds_exactly_the_four_local_sources():
+    res = build(load_config(None), {})
+    assert sorted(s.name for s in res.sources) == ["claude", "codex", "gemini", "host"]
+    assert res.skipped == {}
+
+
+def test_enabling_ollama_without_url_names_source_and_option(tmp_path):
+    cfg = cfg_from(tmp_path, "[sources.ollama]\nenabled = true\n")
+    with pytest.raises(ConfigError) as ei:
+        build_sources(cfg, {})
+    assert "ollama" in str(ei.value) and "url" in str(ei.value)
+
+
+@pytest.mark.parametrize("source", ["runners", "copilot"])
+def test_enabling_without_repos_names_source_and_option(tmp_path, source):
+    cfg = cfg_from(tmp_path, f"[sources.{source}]\nenabled = true\n")
+    with pytest.raises(ConfigError) as ei:
+        build_sources(cfg, {})
+    assert source in str(ei.value) and "repos" in str(ei.value)
+
+
+def test_runners_with_repos_and_no_token_env_var_still_builds(tmp_path):
+    cfg = cfg_from(tmp_path, '[sources.runners]\nrepos = ["owner/name"]\n')
+    res = build(cfg, {})
+    assert "runners" in [s.name for s in res.sources]
+    assert "runners" in res.notes

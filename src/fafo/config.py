@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
+# Sources that need no options are on by default; the rest need a table in the file.
+DEFAULT_ENABLED = ("host", "claude", "codex", "gemini")
 DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
@@ -229,7 +231,7 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
 def _parse_sources(raw: object) -> dict[str, SourceCfg]:
     if not isinstance(raw, dict):
         raise ConfigError("'sources' must be a table")
-    out = {name: SourceCfg() for name in SOURCE_NAMES}
+    out = {name: SourceCfg(enabled=name in DEFAULT_ENABLED) for name in SOURCE_NAMES}
     for name, body in raw.items():
         if name not in SOURCE_NAMES:
             raise ConfigError(f"unknown source '{name}'")
