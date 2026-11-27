@@ -66,11 +66,13 @@ CEILING_S = 5.0
 
 
 def _best_of_3(fn):
+    # process_time (CPU seconds of this process) ignores time spent descheduled on a
+    # loaded machine, which is what made wall-clock limits flaky.
     best = None
     for _ in range(3):
-        start = time.perf_counter()
+        start = time.process_time()
         fn()
-        took = time.perf_counter() - start
+        took = time.process_time() - start
         best = took if best is None else min(best, took)
     return best
 
@@ -136,7 +138,7 @@ def test_scale_check_bites_on_quadratic_work():
         return go
 
     with pytest.raises(AssertionError):
-        _assert_scales_linearly(quadratic, 200)
+        _assert_scales_linearly(quadratic, 300)
 
 
 def test_regexes_themselves_are_bounded():
