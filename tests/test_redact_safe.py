@@ -96,6 +96,19 @@ TABLE = [
     ("short flag value hidden", ["tool", "-n", "hunter2", "run"], "tool -n <arg> run"),
     ("node flag then script hidden", ["node", "--inspect", "app.js"], "node --inspect <arg>"),
     ("python flag then script hidden", ["python", "-u", "script.py", "x"], "python -u <arg> x"),
+    ("bash -cpass attached", ["bash", "-cpass"], "bash -c <script>"),
+    ("python -efoo attached", ["python", "-efoo"], "python -e <script>"),
+    ("bash -lcpass attached", ["bash", "-lcpass"], "bash -lc <script>"),
+    ("node -eXYZ attached", ["node", "-eXYZ"], "node -e <script>"),
+    ("python -ec cluster", ["python3", "-ec", "x"], "python3 -e <script>"),
+    ("attached secret tail", ["sh", "-cghp_abcdefghijklmnop"], "sh -c <script>"),
+    ("attached equals tail", ["bash", "-cfoo=bar", "next"], "bash -c <script>"),
+    ("eval equals form", ["node", "--eval=1+1", "next"], "node --eval <script>"),
+    ("option terminator then word", ["cmd", "--", "word"], "cmd -- word"),
+    ("git checkout terminator", ["git", "checkout", "--", "file"], "git checkout -- file"),
+    ("terminator then secret flag", ["cmd", "--", "--token", "abc"], "cmd -- <arg> <arg>"),
+    ("terminator then url", ["cmd", "--", "https://h.example.invalid/x"], "cmd -- <arg>"),
+    ("terminator then script", ["python", "--", "run.py"], "python -- run.py"),
     ("bare words", ["tool", "status", "run", "tests"], "tool status run tests"),
     ("python module with dots and port", ["python3.11", "-m", "http.server", "8000"],
      "python3.11 -m http.server 8000"),
@@ -166,6 +179,33 @@ def test_flag_values_are_never_echoed():
 def test_shown_valueless_flag_still_hides_next_word():
     out = safe(["tool", "--verbose", "hunter2"], show={"--verbose"})
     assert out == "tool --verbose <arg>"
+
+
+def test_attached_code_flag_tail_is_never_shown_property():
+    rng = random.Random(683)
+    tails = [*SECRETS, "pass", "foo", "XYZ", "x", "1", "hunter2", "$(id)"]
+    count = 0
+    for _ in range(3000):
+        pre = "".join(rng.choice("lxsbvuH") for _ in range(rng.randrange(0, 3)))
+        code = rng.choice("ce")
+        tail = rng.choice(tails)
+        tok = "-" + pre + code + tail
+        for exe in ("bash", "python3", "node", "sh"):
+            out = safe([exe, tok, "next"])
+            count += 1
+            assert out == f"{exe} -{pre}{code} <script>", (tok, out)
+            assert tail not in out.split(SP)[1:] and "next" not in out
+    assert count == 12000
+
+
+def test_code_flag_guard_bites_on_non_interpreters():
+    """Negative case: outside the interpreter list the cluster rule does not apply."""
+    assert safe(["tool", "-cpass"]) == "tool <arg>"
+
+
+def test_terminator_sets_no_flag_state():
+    assert safe(["tool", "--", "status"]) == "tool -- status"
+    assert safe(["tool", "--token", "--", "status"]) == "tool <arg> -- status"
 
 
 # ---- Explicitly shown arguments keep their allowlist behavior ----

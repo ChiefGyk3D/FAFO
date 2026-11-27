@@ -203,7 +203,7 @@ _PATH_CHARS = re.compile(r"^[A-Za-z0-9_.+/~-]+$")
 _EMBEDDED_PREFIX = re.compile(
     r"(?i)(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|akia|aiza|eyj)[A-Za-z0-9_-]{10,}"
 )
-_CODE_CLUSTER = re.compile(r"^-[A-Za-z]{1,5}$")
+_CODE_CLUSTER = re.compile(r"^(-[abdf-zA-Z]{0,4}[ce])")
 _HEADER_WORDS = frozenset({"bearer", "basic", "authorization"})
 _SINGLE_DASH_MAX = 5  # letters after a single dash; longer is likely an option with a glued value
 
@@ -242,10 +242,21 @@ def _safe_word(tok: str, pattern: re.Pattern[str], *, any_path: bool) -> str:
     return word
 
 
-def _is_code_flag(tok: str) -> bool:
+def _code_flag(tok: str) -> str | None:
+    """The displayable part of an interpreter code flag, or None when tok is not one.
+
+    -E and --eval show as they are. A single-dash cluster is a code flag when a c or e
+    comes within its first five letters; only the letters up to and including that first
+    c or e are returned (a validated flag), never an attached argument ("-cpass" gives
+    "-c"). A prefix that is not a displayable flag gives ARG.
+    """
     if tok in ("--eval", "-E"):
-        return True
-    return bool(_CODE_CLUSTER.match(tok)) and ("c" in tok or "e" in tok)
+        return tok
+    m = _CODE_CLUSTER.match(tok)
+    if not m:
+        return None
+    prefix = m.group(1)
+    return prefix if _flag_ok(prefix) else ARG
 
 
 def _safe_tail(
@@ -289,12 +300,15 @@ def _safe_tail(
             out.append(_keep(tok))
             after_flag = tok.startswith("-")
             continue
+        if tok == "--":  # option terminator: no value follows, later words are ordinary
+            out.append(tok)
+            continue
         if tok.startswith("-"):
             name, eq, value = tok.partition("=")
             if eq and name in shown and name in valued:
                 out.append(f"{_keep(name)}={_keep(value, name)}")
-            elif interp is not None and not eq and _is_code_flag(tok):
-                out.append(tok if _flag_ok(tok) or _CODE_CLUSTER.match(tok) else ARG)
+            elif interp is not None and (code := _code_flag(name)) is not None:
+                out.append(code)
                 out.append(SCRIPT)
                 return
             elif python and tok == "-m":
