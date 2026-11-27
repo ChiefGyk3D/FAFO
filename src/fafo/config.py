@@ -36,12 +36,13 @@ class Config:
     snapshot_path: Path
     show_args: set[str]
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
+    _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def alias(self, text: str) -> str:
         """Replace configured hostnames/IPs with their aliases (longest match first)."""
         if self._alias_re is None:
             return text
-        return self._alias_re.sub(lambda m: self.aliases[m.group(0)], text)
+        return self._alias_re.sub(lambda m: self._alias_map[m.group(0).lower()], text)
 
 
 def _default_snapshot_path() -> Path:
@@ -108,7 +109,20 @@ def _compile_aliases(aliases: dict[str, str]) -> re.Pattern[str] | None:
     names = sorted(aliases, key=len, reverse=True)
     body = "|".join(re.escape(n) for n in names)
     # Do not match inside a longer hostname or IP (10.0.0.1 inside 10.0.0.12).
-    return re.compile(rf"(?<![\w.-])(?:{body})(?![\w-])(?!\.\w)")
+    # Hostnames are case-insensitive, so match any case variant.
+    return re.compile(rf"(?<![\w.-])(?:{body})(?![\w-])(?!\.\w)", re.IGNORECASE)
+
+
+def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
+    """Return a lowercase-keyed map; reject blank keys and keys that differ only by case."""
+    lowered: dict[str, str] = {}
+    for k, v in aliases.items():
+        if not k.strip():
+            raise ConfigError("'aliases' has an empty or blank host key")
+        if k.lower() in lowered:
+            raise ConfigError(f"'aliases' key '{k}' duplicates another key except for case")
+        lowered[k.lower()] = v
+    return lowered
 
 
 def load_config(path: Path | None) -> Config:
@@ -133,6 +147,8 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(aliases, dict) or not all(isinstance(v, str) for v in aliases.values()):
         raise ConfigError("'aliases' must be a table of host = \"alias\" strings")
 
+    alias_map = _validate_alias_keys(aliases)
+
     show = data.get("show_args", list(DEFAULT_SHOW_ARGS))
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
@@ -151,4 +167,5 @@ def load_config(path: Path | None) -> Config:
         snapshot_path=snapshot_path,
         show_args=set(show),
         _alias_re=_compile_aliases(aliases),
+        _alias_map=alias_map,
     )

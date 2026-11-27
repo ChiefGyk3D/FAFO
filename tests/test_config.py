@@ -134,3 +134,35 @@ def test_example_config_loads_and_has_only_placeholders():
     assert chr(0x2014) not in text
     for host in cfg.aliases:
         assert host.endswith(".invalid") or host.startswith(("192.0.2.", "198.51.100."))
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["realhost.example.invalid", "REALHOST.EXAMPLE.INVALID", "RealHost.Example.Invalid"],
+)
+def test_alias_matches_any_case(tmp_path, variant):
+    cfg = load_config(write(tmp_path, '[aliases]\n"realhost.example.invalid" = "Runner-1"\n'))
+    assert cfg.alias(f"ssh {variant} ok") == "ssh Runner-1 ok"
+
+
+def test_alias_case_insensitive_longest_match_first(tmp_path):
+    p = write(tmp_path, '[aliases]\n"a.invalid" = "A"\n"B.A.invalid" = "B"\n')
+    assert load_config(p).alias("b.a.INVALID and A.Invalid") == "B and A"
+
+
+def test_alias_boundary_prefix_not_matched(tmp_path):
+    cfg = load_config(write(tmp_path, '[aliases]\n"192.0.2.7" = "x"\n'))
+    assert cfg.alias("10.192.0.2.7 and xhost-192.0.2.7") == "10.192.0.2.7 and xhost-192.0.2.7"
+    assert cfg.alias("192.0.2.77") == "192.0.2.77"
+
+
+@pytest.mark.parametrize("key", ['""', '"   "', '"\\t"'])
+def test_empty_or_blank_alias_key_rejected(tmp_path, key):
+    with pytest.raises(ConfigError, match="aliases"):
+        load_config(write(tmp_path, f'[aliases]\n{key} = "x"\n'))
+
+
+def test_case_duplicate_alias_keys_rejected(tmp_path):
+    p = write(tmp_path, '[aliases]\n"Host.invalid" = "a"\n"host.INVALID" = "b"\n')
+    with pytest.raises(ConfigError, match="case"):
+        load_config(p)
