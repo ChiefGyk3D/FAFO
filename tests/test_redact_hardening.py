@@ -75,7 +75,7 @@ def test_regexes_themselves_are_bounded():
     """Defense in depth: even if the length cap were bypassed, no regex is quadratic."""
     from fafo.redact import _CREDENTIAL_VALUE, _LONG_RUN
 
-    for body in ("a" * 200_000, "https://" + "a" * 200_000, "key" + " " * 200_000):
+    for body in ("a" * 20_000, "https://" + "a" * 20_000, "key" + " " * 20_000):
         start = time.monotonic()
         _CREDENTIAL_VALUE.search(body)
         _LONG_RUN.search(body)

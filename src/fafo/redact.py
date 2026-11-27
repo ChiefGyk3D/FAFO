@@ -39,7 +39,7 @@ _CREDENTIAL_VALUE = re.compile(
     | \bbearer\s{{1,16}}\S                                    # bearer header value
     | \bbasic\s{{1,16}}[A-Za-z0-9+/=]{{6,}}                    # basic header value
     | \b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|akia|aiza|eyj)[A-Za-z0-9_-]   # known prefixes
-    | (?:[\w-]{{0,64}}(?:{_SECRET_SUBSTR})[\w-]{{0,64}}
+    | (?:(?:{_SECRET_SUBSTR})[\w-]{{0,64}}
        |(?<![A-Za-z0-9])(?:{"|".join(sorted(_SECRET_WORDS))}))
       \s{{0,8}}[=:]\s{{0,8}}\S                                 # key=value
     """
