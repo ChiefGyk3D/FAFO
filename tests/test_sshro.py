@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import wait_gone
 
 from fafo.sshro import OPS, SshError, SshHost, build_argv, default_runner, ssh_ro
 
@@ -152,13 +153,7 @@ def test_hung_child_cut_by_deadline_and_group_killed(tmp_path):
     assert not th.is_alive(), "ssh deadline did not fire"
     assert "err" in result and result["elapsed"] < 5
     pid = int(pidfile.read_text())
-    for _ in range(40):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.05)
-    else:
+    if not wait_gone([pid]):
         os.kill(pid, 9)
         pytest.fail("child process survived the group kill")
 
@@ -184,24 +179,68 @@ def test_grep_pattern_cannot_match_its_own_command_line():
     assert re.search(pattern, self_line) is None
 
 
-def test_normal_exit_sends_no_signal(tmp_path, monkeypatch):
-    sent: list[tuple] = []
-    monkeypatch.setattr("fafo.sshro.os.killpg", lambda *a: sent.append(a))
+ENV = {"PATH": os.environ["PATH"]}
+
+
+def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
     script = _script(tmp_path, "echo hi\n")
-    assert default_runner([str(script)], 5.0, {"PATH": os.environ["PATH"]}) == (0, b"hi\n")
-    assert sent == []
+    assert default_runner([str(script)], 5.0, ENV) == (0, b"hi\n")
+    kills = group_kill_spy.kills()
+    assert len(kills) == 1
+    assert group_kill_spy.reaped_when_killed == []
+    pid = kills[0][1]
+    kill_at = group_kill_spy.events.index(kills[0])
+    assert ("wait", pid) in group_kill_spy.events[kill_at:]
 
 
-def test_hung_child_gets_group_sigkill_before_reap(tmp_path, monkeypatch):
-    sent: list[tuple] = []
-    real = os.killpg
+def test_normal_exit_kills_grandchild_left_behind(tmp_path):
+    pidfile = tmp_path / "gc.pid"
+    script = _script(tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho done\n")
+    assert default_runner([str(script)], 5.0, ENV) == (0, b"done\n")
+    pid = int(pidfile.read_text())
+    if not wait_gone([pid]):
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("grandchild outlived a normally exited child")
 
-    def spy(pgid, sig):
-        sent.append((pgid, sig))
-        real(pgid, sig)
 
-    monkeypatch.setattr("fafo.sshro.os.killpg", spy)
-    script = _script(tmp_path, "sleep 30 &\nwait\n")
+def test_hung_child_and_grandchild_killed_within_deadline(tmp_path, group_kill_spy):
+    pidfile = tmp_path / "gc.pid"
+    script = _script(tmp_path, f"sleep 30 &\necho $! > {pidfile}\nwait\n")
+    t0 = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        default_runner([str(script)], 0.5, {"PATH": os.environ["PATH"]})
-    assert len(sent) == 1 and sent[0][1] == signal.SIGKILL
+        default_runner([str(script)], 0.5, ENV)
+    assert time.monotonic() - t0 < 5
+    assert len(group_kill_spy.kills()) >= 1
+    assert group_kill_spy.reaped_when_killed == []
+    pid = int(pidfile.read_text())
+    if not wait_gone([pid]):
+        os.kill(pid, signal.SIGKILL)
+        pytest.fail("grandchild survived the deadline kill")
+
+
+def test_externally_reaped_child_gets_no_signal(tmp_path, group_kill_spy, monkeypatch):
+    real_wait = os.waitid
+    script = _script(tmp_path, "echo hi\n")
+    real_popen = subprocess.Popen
+    holder: list = []
+
+    class P(real_popen):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            holder.append(self)
+
+    monkeypatch.setattr("fafo.sshro.subprocess.Popen", P)
+
+    # Reap the child behind Popen's back as soon as it has exited, before the runner looks.
+    def waitid(idtype, pid, flags):
+        if holder and pid == holder[0].pid and flags & os.WNOWAIT:
+            try:
+                real_wait(os.P_PID, pid, os.WEXITED)  # blocks until exit
+                os.waitpid(pid, 0)  # external reap
+            except ChildProcessError:
+                pass
+        return real_wait(idtype, pid, flags)
+
+    monkeypatch.setattr("fafo.procutil.os.waitid", waitid)
+    default_runner([str(script)], 5.0, ENV)
+    assert group_kill_spy.kills() == []

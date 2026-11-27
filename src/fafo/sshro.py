@@ -12,12 +12,12 @@ from __future__ import annotations
 import os
 import re
 import selectors
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from .procutil import kill_and_reap, wait_exited_unreaped
 from .redact import sanitize_text
 
 MAX_OUTPUT = 64 * 1024
@@ -96,7 +96,7 @@ def default_runner(argv: Sequence[str], timeout_s: float, env: Mapping[str, str]
     """Run argv; return (exit code, stdout capped at MAX_OUTPUT + 1 bytes).
 
     One monotonic deadline covers reads and the exit wait. The child's whole process group is
-    killed in `finally`. Raises FileNotFoundError, OSError or subprocess.TimeoutExpired.
+    killed before the reap, on every path including a normal exit. Raises FileNotFoundError, OSError or subprocess.TimeoutExpired.
     """
     proc = subprocess.Popen(
         list(argv),
@@ -125,22 +125,17 @@ def default_runner(argv: Sequence[str], timeout_s: float, env: Mapping[str, str]
                 buf += chunk
         if len(buf) > MAX_OUTPUT:
             return 0, bytes(buf)
-        rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if not wait_exited_unreaped(proc, deadline - time.monotonic()):
+            raise subprocess.TimeoutExpired(list(argv), timeout_s)
+        kill_and_reap(proc)  # exited: kill any grandchild while the leader is unreaped, then reap
+        rc = proc.returncode
+        if rc is None:
+            raise subprocess.TimeoutExpired(list(argv), timeout_s)
         return rc, bytes(buf)
     finally:
-        # Kill the group only while the child is still running (not yet reaped), so a reused
-        # pid can never receive the signal. After a normal exit nothing is signalled.
-        if proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        kill_and_reap(proc)  # kill the group before the reap, never after
         if proc.stdout is not None:
             proc.stdout.close()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 def _fail(reason: str) -> SshError:

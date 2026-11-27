@@ -12,6 +12,8 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
+from conftest import wait_gone
+
 from fafo.config import SourceCfg
 from fafo.source import Ctx
 from fafo.sources.host import MAX_ITEMS, HostSource
@@ -164,14 +166,8 @@ def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
         assert time.monotonic() - t0 < 5
         assert "gpus" not in box["res"].host
         assert box["res"].host["load1"] == 0.5
-        deadline = time.monotonic() + 3
-        while pid is not None and time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pid = None
-            else:
-                time.sleep(0.05)
+        if pid is not None and wait_gone([pid], 3.0):
+            pid = None
         assert pid is None, "child survived the deadline"
     finally:
         if pid is not None:  # only a test failure leaves it; kill the exact pid we recorded
@@ -275,17 +271,7 @@ def test_normal_exit_leaves_no_grandchild(tmp_path):
     )
     assert b"0, n" in _run_capped([exe], 3.0, _MIN_ENV)
     pid = int(pidfile.read_text())
-    end = time.monotonic() + 3
-    while time.monotonic() < end:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        try:  # a zombie not yet reaped by init still counts as dead
-            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
-                return
-        except OSError:
-            return
-        time.sleep(0.05)
+    if wait_gone([pid], 3.0):
+        return
     os.kill(pid, 9)
     raise AssertionError("grandchild survived a normal exit")

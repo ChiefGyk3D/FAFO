@@ -6,6 +6,8 @@ import sys
 import threading
 import time
 
+from conftest import wait_gone
+
 from fafo.adapters.safo import MAX_OUTPUT, SafoAdapter
 
 GOOD = '{"sessions": [{"session_id": "s1", "issue": "o/r#1"}]}'
@@ -13,23 +15,6 @@ GOOD = '{"sessions": [{"session_id": "s1", "issue": "o/r#1"}]}'
 
 def child(code):
     return [sys.executable, "-c", code]
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def wait_gone(pids, limit=2.0):
-    end = time.monotonic() + limit
-    while time.monotonic() < end:
-        if not any(pid_alive(p) for p in pids):
-            return True
-        time.sleep(0.02)
-    return False
 
 
 def run_guarded(adapter, pidfile, limit):
