@@ -12,6 +12,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import get_args
 
+from .jsonsafe import check_finite
 from .model import (
     SNAPSHOT_VERSION,
     Inflight,
@@ -98,6 +99,11 @@ def _str(v):
 def _dict(v):
     if type(v) is not dict:
         raise TypeError("expected dict")
+    check_finite(v)
+
+
+def _refuse_constant(name):
+    raise ValueError("non-standard JSON constant")
 
 
 def _status(v):
@@ -203,7 +209,7 @@ def _snapshot(doc) -> Snapshot:
 def read_snapshot(path: Path) -> Snapshot | None:
     """Return the snapshot, or None if missing, truncated, invalid or an unknown version."""
     try:
-        doc = json.loads(Path(path).read_bytes())
+        doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
         return _snapshot(doc)
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
