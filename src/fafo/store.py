@@ -1,4 +1,9 @@
-"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix."""
+"""Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix.
+
+Strict schema: a session's `project_source` key is written only when it is not "live". The reader
+accepts both forms, but an older reader refuses a snapshot that contains a last-known or folder
+project (it rejects unknown keys) by design; SNAPSHOT_VERSION is deliberately not bumped for this.
+"""
 
 from __future__ import annotations
 
@@ -52,6 +57,17 @@ def ensure_private_dir(directory: Path) -> None:
     _ensure_dir(Path(directory))
 
 
+def _omit_default_source(plain) -> None:
+    """Leave out the default project_source ("live") so a snapshot with no last-known project keeps
+    the exact key set older readers accept. A snapshot that does carry one (idle session showing its
+    last repo, or a folder name) is refused by older readers by design: the schema is strict."""
+    sessions = plain.get("sessions") if isinstance(plain, dict) else None
+    if isinstance(sessions, list):
+        for s in sessions:
+            if isinstance(s, dict) and s.get("project_source") == "live":
+                del s["project_source"]
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -66,6 +82,7 @@ def write_snapshot(
     plain, replaced = plain_copy(snap)
     if replaced:
         _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
+    _omit_default_source(plain)
     payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

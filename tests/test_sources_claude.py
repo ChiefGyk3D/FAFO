@@ -562,3 +562,41 @@ def test_remembered_cache_is_bounded(tmp_path):
     assert len(src._last_repo) == claude.MAX_LAST_REPOS
     assert "sid-0" not in src._last_repo
     assert f"sid-{claude.MAX_LAST_REPOS + 49}" in src._last_repo
+
+
+def _set_cwd(src, name, cwd):
+    p = src.dir / f"{name}.json"
+    doc = json.loads(p.read_text())
+    doc["cwd"] = str(cwd)
+    p.write_text(json.dumps(doc))
+
+
+def test_cwd_git_attribution_is_remembered_and_marked_when_idle_elsewhere(tmp_path):
+    clock = Clock()
+    src, repo_dir = _repo_env(tmp_path)
+    _drop_children(src)
+    _set_cwd(src, "4000", repo_dir)
+    live = _get(src.collect(_ctx(clock)), 4000)
+    assert (live.project.value, live.project_rule, live.project_source) == (
+        "chatty-kathy", "cwd-git", "live")
+    plain = tmp_path / "plain-folder"
+    plain.mkdir()
+    _set_cwd(src, "4000", plain)
+    clock.t += 60
+    idle = _get(src.collect(_ctx(clock)), 4000)
+    assert (idle.project.value, idle.project_source) == ("chatty-kathy", "last")
+
+
+def test_outage_over_a_day_expires_the_remembered_repo(tmp_path):
+    clock = Clock()
+    src, _ = _repo_env(tmp_path)
+    assert _get(src.collect(_ctx(clock)), 4000).project_source == "live"
+    _drop_children(src)
+    away = tmp_path / "sessions-away"
+    src.dir.rename(away)
+    clock.t += claude.LAST_REPO_TTL_S + 60
+    assert src.collect(_ctx(clock)).status == "absent"  # registry unavailable
+    away.rename(src.dir)
+    clock.t += 1
+    back = _get(src.collect(_ctx(clock)), 4000)
+    assert back.project_source == "folder"  # the stale memory did not survive the outage

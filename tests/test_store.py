@@ -1,6 +1,7 @@
 import json
 import stat
 import threading
+from dataclasses import fields
 from pathlib import Path
 
 from fafo.model import (
@@ -576,3 +577,16 @@ def test_sanitize_warning_wording_and_no_values(tmp_path: Path, caplog):
         write_snapshot(tmp_path / "snap.json", snap)
     msgs = [r.getMessage() for r in caplog.records if r.name == "fafo.store"]
     assert msgs == ["snapshot: sanitized 3 values (nulled, dropped or truncated)"]
+
+
+def test_default_live_snapshot_has_the_pre_project_source_key_set(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    old = {f.name for f in fields(Session)} - {"project_source"}
+    for s in doc["sessions"]:
+        assert set(s) == old
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    assert json.loads(path.read_text())["sessions"][0]["project_source"] == "last"
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"

@@ -43,6 +43,7 @@ MAX_CWD = 200
 MAX_ID = 128
 STAT_CAP = 4096
 MAX_LAST_REPOS = 512  # remembered last repo names, one per session id
+_LIVE_REPO_RULES = ("children-git", "cwd-git", "adapter")  # a repo seen right now
 LAST_REPO_TTL_S = 24 * 3600.0  # forget a session id this long after it was last seen
 _NAME_RE = re.compile(r"[0-9]{1,10}\.json")
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -402,9 +403,10 @@ class ClaudeSource:
     # -- collect -------------------------------------------------------------------------
     def collect(self, ctx: Ctx) -> SourceResult:
         entries = self._live_entries(ctx)
-        if entries is None:
-            return SourceResult(status="absent")
         now = ctx.clock()
+        if entries is None:
+            self._expire_last(now)  # an outage must not keep stale memory past its TTL
+            return SourceResult(status="absent")
         live = {e["pid"] for e in entries}
         result = SourceResult()
         self._seen = set()
@@ -440,7 +442,7 @@ class ClaudeSource:
         project, rule = attribute(cwd, child_cwds, **kw)
         sid = e["sessionId"]
         source = "live"
-        if rule == "children-git":
+        if rule in _LIVE_REPO_RULES:
             self._remember(sid, project, now)
         else:
             held = self._last_repo.get(sid)

@@ -73,7 +73,7 @@ def build_session_index(views: Views, snapshot: Snapshot | None) -> tuple[list[d
     if snapshot is not None:
         rows = [
             _index_entry(
-                x.session_id, x.name, x.pid, project_label(x.project.value, x.project_source),
+                x.session_id, x.name, x.pid, project_label(x.project.value, x.project_source, _IDX_PROJECT),
                 x.state, x.address,
             )
             for x in snapshot.sessions
@@ -81,7 +81,12 @@ def build_session_index(views: Views, snapshot: Snapshot | None) -> tuple[list[d
         ]
     else:
         rows = [
-            _index_entry(n.session_id, n.name, n.pid, n.project, n.state, n.address)
+            _index_entry(
+                n.session_id, n.name, n.pid,
+                project_label(n.project.removesuffix("~") if n.project_source == "last" else n.project,
+                              n.project_source, _IDX_PROJECT),
+                n.state, n.address,
+            )
             for n in views.sessions
             if n.agent == "claude"
         ]

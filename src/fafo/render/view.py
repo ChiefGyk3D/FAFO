@@ -284,10 +284,12 @@ def _proc_node(p: Proc, all_stale: bool, snap_age: str) -> ProcNode:
     )
 
 
-def project_label(value: str, source: str) -> str:
-    """Project name for display; a trailing `~` marks a last-known repo of an idle session."""
-    text = _s(value, _CAP_PROJECT)
-    return f"{text}~" if source == "last" else text
+def project_label(value: str, source: str, cap: int = _CAP_PROJECT) -> str:
+    """Project name for display, at most cap characters; a trailing `~` marks a last-known repo
+    of an idle session (the name is cut to cap - 1 first so the marker always fits)."""
+    if source == "last":
+        return _s(value, cap - 1) + "~"
+    return _s(value, cap)
 
 
 def _session_node(

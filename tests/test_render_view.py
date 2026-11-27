@@ -298,3 +298,12 @@ def test_last_known_project_gets_trailing_tilde_and_source():
     assert by["a"].project == "chatty-kathy~" and by["a"].project_source == "last"
     assert by["b"].project == "src" and by["b"].project_source == "folder"
     assert by["c"].project == "alpha" and by["c"].project_source == "live"
+
+
+def test_long_project_name_keeps_marker_within_cap():
+    from fafo.render.view import project_label
+
+    for n in (63, 64, 65, 200):
+        got = project_label("p" * n, "last")
+        assert got.endswith("~") and len(got) <= 64, n
+    assert project_label("p" * 200, "live") == "p" * 64
