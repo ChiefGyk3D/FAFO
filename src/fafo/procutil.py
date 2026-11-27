@@ -12,6 +12,9 @@ every path does: read output with the deadline, wait for exit WITHOUT reaping
 (`wait_exited_unreaped`, waitid with WNOWAIT), kill the group, then reap with a bounded wait
 (`kill_and_reap`).
 
+Another waiter may reap the child behind Popen's back; `_already_reaped` detects that
+(ECHILD from waitid) and skips the signal.
+
 `poll()` is deliberately not used to decide: it reaps an exited child, which would make the
 grandchild unreachable. The guard reads `proc.returncode`, which is only set once something
 has reaped the child, so an already-reaped Popen never gets a signal and a second call is a
@@ -28,9 +31,30 @@ import time
 _POLL_S = 0.005
 
 
+def _already_reaped(proc: subprocess.Popen) -> bool:
+    """True when the child is gone from the kernel's table (reaped by us or anyone else).
+
+    Probes with waitid(WNOWAIT), which never reaps. ChildProcessError means another waiter
+    already reaped it: the pid may be reused, so the group must not be signalled. Popen is
+    told through poll() (it records its own ECHILD handling); if returncode is still None
+    we set the documented sentinel 0 (the real status is unknowable) so every later check
+    sees a definite "reaped" state.
+    """
+    if proc.returncode is not None:
+        return True
+    try:
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        proc.poll()
+        if proc.returncode is None:
+            proc.returncode = 0  # sentinel: reaped elsewhere, status unknown
+        return True
+    return False
+
+
 def kill_group_if_running(proc: subprocess.Popen) -> None:
     """SIGKILL the child's process group unless the child was already reaped."""
-    if proc.returncode is not None:
+    if _already_reaped(proc):
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -52,7 +76,7 @@ def wait_exited_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
 
     True also when the child was already reaped.
     """
-    if proc.returncode is not None:
+    if _already_reaped(proc):
         return True
     deadline = time.monotonic() + max(0.0, timeout)
     flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
@@ -61,7 +85,7 @@ def wait_exited_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
             if os.waitid(os.P_PID, proc.pid, flags) is not None:
                 return True
         except ChildProcessError:
-            return True  # already reaped elsewhere
+            return _already_reaped(proc)  # records the reaped state; always True here
         if time.monotonic() >= deadline:
             return False
         time.sleep(_POLL_S)

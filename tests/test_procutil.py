@@ -95,3 +95,38 @@ def test_missing_group_and_permission_errors_are_tolerated(monkeypatch):
         monkeypatch.undo()
     finally:
         procutil.kill_and_reap(proc)
+
+
+def test_waitid_childprocesserror_means_reaped_no_signal(killpg_calls, monkeypatch):
+    proc = spawn("import time; time.sleep(30)")
+    try:
+        def gone(*a, **kw):
+            raise ChildProcessError()
+
+        monkeypatch.setattr(os, "waitid", gone)
+        assert procutil.wait_exited_unreaped(proc, 1.0) is True
+        procutil.kill_and_reap(proc)
+        procutil.kill_group_if_running(proc)
+        assert killpg_calls == []
+        assert proc.returncode is not None
+    finally:
+        monkeypatch.undo()
+        proc.kill()
+        proc.wait()
+
+
+def test_externally_reaped_child_gets_no_signal(killpg_calls):
+    proc = spawn("pass")
+    os.waitpid(proc.pid, 0)  # someone else reaps; Popen.returncode stays None
+    assert proc.returncode is None
+    procutil.kill_and_reap(proc)
+    assert killpg_calls == []
+    assert proc.returncode is not None
+
+
+def test_externally_reaped_child_after_wait_helper_gets_no_signal(killpg_calls):
+    proc = spawn("pass")
+    os.waitpid(proc.pid, 0)
+    assert procutil.wait_exited_unreaped(proc, 1.0) is True
+    procutil.kill_and_reap(proc)
+    assert killpg_calls == []
