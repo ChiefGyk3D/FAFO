@@ -82,13 +82,13 @@ def test_version(capsys):
     assert fafo.__version__ in capsys.readouterr().out
 
 
-def test_extension_hook_is_a_noop():
+def test_extension_hook_registers_render_commands():
     import argparse
 
     sub = argparse.ArgumentParser().add_subparsers()
-    before = dict(sub.choices or {})
+    assert not (sub.choices or {})
     cli.add_render_commands(sub)
-    assert dict(sub.choices or {}) == before
+    assert set(sub.choices) == {"table", "json", "sessions", "tui"}
 
 
 def test_no_subcommand_is_usage_error():
