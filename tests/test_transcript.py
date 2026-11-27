@@ -182,7 +182,7 @@ def test_prompt_redacts_token_and_cuts_with_ellipsis(tmp_path):
     assert FAKE_TOKEN not in got and "ghp_" not in got
     assert "<redacted>" in got
     assert got.endswith("...")
-    assert len(got) == 63  # 60 characters plus the three-dot ellipsis
+    assert 60 <= len(got) <= 63  # at most 60 characters plus the ellipsis
 
 
 def test_prompt_short_message_has_no_ellipsis(tmp_path):
@@ -323,24 +323,24 @@ def test_never_raises(tmp_path, monkeypatch):
 # -- cache --------------------------------------------------------------------------------
 def test_cache_avoids_rereading_unchanged_file(tmp_path, monkeypatch):
     f = put(tmp_path, [tool("Bash", command="make")])
-    opens: list[str] = []
-    real_open = os.open
+    reads: list[int] = []
+    real_read = os.read
 
-    def spy(path, *a, **k):
-        opens.append(os.fspath(path))
-        return real_open(path, *a, **k)
+    def spy(fd, n):
+        reads.append(n)
+        return real_read(fd, n)
 
-    monkeypatch.setattr(transcript.os, "open", spy)
+    monkeypatch.setattr(transcript.os, "read", spy)
     assert label(tmp_path) == "Bash: make"
-    first = sum(p.endswith(".jsonl") for p in opens)
-    assert first == 1
+    first = len(reads)
+    assert first >= 1
     assert label(tmp_path) == "Bash: make"
-    assert sum(p.endswith(".jsonl") for p in opens) == first
+    assert len(reads) == first
     # A changed file is read again.
     f.write_text(tool("Grep", pattern="x") + "\n", encoding="utf-8")
     os.utime(f, (T0 + 1, T0 + 1))
     assert label(tmp_path, now=T0 + 3) == "Grep"
-    assert sum(p.endswith(".jsonl") for p in opens) == first + 1
+    assert len(reads) > first
 
 
 def test_cache_is_bounded(tmp_path):
@@ -378,7 +378,7 @@ def spy_fs(monkeypatch):
     return calls
 
 
-def test_repeated_calls_scan_once_then_one_lstat_each(tmp_path, monkeypatch):
+def test_repeated_calls_scan_once_then_only_descriptor_checks(tmp_path, monkeypatch):
     put(tmp_path, [tool("Bash", command="make")])
     for i in range(20):  # more project dirs make a scan costly
         (tmp_path / f"-other-{i}").mkdir()
@@ -386,8 +386,8 @@ def test_repeated_calls_scan_once_then_one_lstat_each(tmp_path, monkeypatch):
     for _ in range(1000):
         assert label(tmp_path) == "Bash: make"
     assert calls["scandir"] == 1
-    # One lstat per call, plus the scan's own probes of the directories listed before the hit.
-    assert 1000 <= calls["lstat"] <= 1000 + 21
+    # Only the scan itself probes paths; the cached calls use descriptors, not path lstat.
+    assert calls["lstat"] <= 21
 
 
 def test_moved_file_triggers_one_rescan(tmp_path, monkeypatch):
@@ -531,3 +531,104 @@ def test_property_keyword_connector_value_never_shows_the_value():
         glue = conn in (":", "=")
         text = f"{key}{conn}{value}" if glue else f"{key}{conn} {value}"
         assert value not in transcript.mask_phrases(text), text
+
+
+# -- descriptor chain: a swapped project directory is never followed ----------------------
+def test_cached_project_dir_swapped_for_symlink_is_refused_and_not_read(tmp_path, monkeypatch):
+    proj = tmp_path / "root"
+    f = put(proj, [tool("Edit", file_path="/a/inside.py")])
+    assert label(proj) == "Edit: inside.py"
+    # Outside tree holds a same-size, same-mtime transcript with different content.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    twin = outside / f.name
+    twin.write_text(tool("Edit", file_path="/a/OUTSID.py") + "\n", encoding="utf-8")
+    assert twin.stat().st_size == f.stat().st_size
+    os.utime(twin, (T0, T0))
+    shutil.rmtree(f.parent)
+    f.parent.symlink_to(outside, target_is_directory=True)
+    reads: list[int] = []
+    real_read = os.read
+    monkeypatch.setattr(
+        transcript.os, "read", lambda fd, n: (reads.append(n), real_read(fd, n))[1]
+    )
+    got = label(proj, now=T0 + 31)
+    assert "OUTSID" not in got and got == ""
+    assert reads == []
+
+
+def test_cached_file_replaced_by_symlink_or_directory_refused_by_descriptors(tmp_path):
+    f = put(tmp_path, [tool("Bash", command="make")])
+    assert label(tmp_path) == "Bash: make"
+    other = tmp_path / "other.jsonl"
+    other.write_text(tool("Grep", pattern="x") + "\n", encoding="utf-8")
+    f.unlink()
+    f.symlink_to(other)
+    assert label(tmp_path, now=T0 + 40) == ""
+    f.unlink()
+    f.mkdir()
+    assert label(tmp_path, now=T0 + 80) == ""
+
+
+# -- whitespace handling in prompt masking ------------------------------------------------
+GAPS = [
+    " " * 2, " " * 5, " " * 20, "\t", "\n", "\r\n\r\n", " \t \n ", chr(0xA0), chr(0x2028),
+    chr(0x2029), chr(0x0B), chr(0x0C), chr(0x200B), chr(0x3000), chr(0x1F),
+]
+
+
+@pytest.mark.parametrize("gap", GAPS)
+def test_prompt_value_hidden_across_any_whitespace(tmp_path, gap):
+    for kw, mid in (("password", ""), ("token", gap + "=" + gap), ("key", gap + "is" + gap)):
+        got = prompt_label(tmp_path, f"{kw}{gap}{mid}hunterTWO please")
+        assert "hunterTWO" not in got, (kw, gap)
+        assert got.startswith(kw)
+
+
+def test_prompt_specific_whitespace_forms(tmp_path):
+    for text in (
+        "password\nhunter2",
+        "password\r\n\r\nhunter2",
+        "token\t=\tabc9z",
+        f"password{chr(0xA0)}hunter2",
+        f"password{chr(0x2028)}hunter2",
+        "password:    hunter2",
+    ):
+        got = prompt_label(tmp_path, text)
+        assert "hunter2" not in got and "abc9z" not in got, text
+
+
+def test_mask_phrases_collapses_runs_and_never_lengthens():
+    assert transcript.mask_phrases("password:     hunter2   x") == "password: ******* *"
+    for text in ("a  b\t\tc", "key     ", "  key   to   ab   cd  "):
+        assert len(transcript.mask_phrases(text)) <= len(text)
+
+
+def test_property_keyword_any_whitespace_value_never_shown(tmp_path):
+    import random
+
+    rng = random.Random(99)
+    spaces = [" ", "\t", "\n", "\r", chr(0xA0), chr(0x2028), chr(0x2029), chr(0x0B), chr(0x0C),
+              chr(0x200B), chr(0x3000), chr(0x2003)]
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    keys = sorted(transcript._KEYWORDS - {"api-key", "api_key"})
+    for _ in range(300):
+        key = rng.choice(keys)
+        gap = "".join(rng.choice(spaces) for _ in range(rng.randint(1, 30)))
+        value = "".join(rng.choice(alphabet) for _ in range(rng.randint(4, 12))) + "Q9z"
+        got = prompt_label(tmp_path, f"{key}{gap}{value}")
+        assert value not in got, (key, gap, value)
+
+
+def test_prompt_labels_clean_and_bounded_in_all_whitespace_cases(tmp_path):
+    texts = [
+        "password\nhunter2",
+        "x" * 500,
+        "token\t=\t" + "y" * 500,
+        "key" + " " * 5000 + "z",
+        chr(27) + "[31mpassword" + chr(27) + "[0m\r\nhunter2 " + "w " * 100,
+    ]
+    for text in texts:
+        got = prompt_label(tmp_path, text)
+        assert len(got) <= 80
+        assert not any(ord(c) < 32 or ord(c) == 127 for c in got)

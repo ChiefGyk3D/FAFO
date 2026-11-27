@@ -11,10 +11,12 @@ human message, credential-masked).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import stat
+import unicodedata
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -53,43 +55,86 @@ def clear_cache() -> None:
     _paths.clear()
 
 
-def _check(projects: Path, dirname: str, fname: str) -> os.stat_result | None:
+class _Chain:
+    """An open projects dir -> project dir -> transcript descriptor chain, checked with fstat."""
+
+    def __init__(self, fds: list[int], st: os.stat_result) -> None:
+        self.fds = fds
+        self.st = st
+
+    @property
+    def fd(self) -> int:
+        return self.fds[-1]
+
+    def close(self) -> None:
+        for d in reversed(self.fds):
+            with contextlib.suppress(OSError):
+                os.close(d)
+        self.fds = []
+
+
+def _open_chain(projects: Path, dirname: str, fname: str) -> _Chain | None:
+    """Open the file by descriptors: no path string is followed after the projects directory.
+
+    The project directory and the file are opened with O_NOFOLLOW relative to their parent, so
+    a swapped-in symlink is refused. Every step is fstat-checked: directories and the file are
+    owned by the effective user and the file is regular. The projects directory itself is the
+    configured root and may be a symlink the owner set up.
+    """
+    uid = os.geteuid()
+    fds: list[int] = []
     try:
-        st = os.lstat(os.path.join(projects, dirname, fname))
+        fds.append(os.open(os.fspath(projects), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        fds.append(os.open(dirname, flags, dir_fd=fds[0]))
+        fds.append(
+            os.open(
+                fname,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=fds[1],
+            )
+        )
+        if any(os.fstat(d).st_uid != uid for d in fds):
+            raise OSError("not owned by the effective user")
+        st = os.fstat(fds[2])
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError("not a regular file")
+        return _Chain(fds, st)
     except OSError:
+        for d in reversed(fds):
+            with contextlib.suppress(OSError):
+                os.close(d)
         return None
-    ok = stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
-    return st if ok else None
 
 
-def _locate_cached(
-    sid: str, projects: Path, now: float
-) -> tuple[str, os.stat_result] | None:
-    """Cached path: one lstat per call. A full directory scan runs only when the cached path
-    fails its checks, and a miss is remembered for RESCAN_S so a session without a
-    transcript costs at most one scan per window."""
+def _locate_cached(sid: str, projects: Path, now: float) -> _Chain | None:
+    """Open chain for the session's transcript. The cached project directory is tried first
+    (descriptor checks only); a directory scan runs only when that fails, and a miss is
+    remembered for RESCAN_S so a session without a transcript costs one scan per window."""
     pk = (os.path.abspath(projects), sid)
     fname = f"{sid}.jsonl"
     ent = _paths.get(pk)
     if ent is not None:
         dirname, scanned = ent
         if dirname is not None:
-            st = _check(projects, dirname, fname)
-            if st is not None:
+            chain = _open_chain(projects, dirname, fname)
+            if chain is not None:
                 _paths.move_to_end(pk)
-                return dirname, st
+                return chain
         elif now - scanned < RESCAN_S:
             return None
     found = _locate(sid, projects)
-    _paths[pk] = (found[0] if found else None, now)
+    chain = _open_chain(projects, found, fname) if found is not None else None
+    _paths[pk] = (found if chain is not None else None, now)
     _paths.move_to_end(pk)
     while len(_paths) > CACHE_MAX:
         _paths.popitem(last=False)
-    return found
+    return chain
 
 
-def _locate(sid: str, projects: Path) -> tuple[str, os.stat_result] | None:
-    """Directory name holding <sid>.jsonl and its lstat result. Reads no file content."""
+def _locate(sid: str, projects: Path) -> str | None:
+    """Name of the project directory that appears to hold <sid>.jsonl. Reads no file content;
+    the result is only a hint that _open_chain verifies."""
     fname = f"{sid}.jsonl"
     try:
         with os.scandir(projects) as it:
@@ -103,24 +148,16 @@ def _locate(sid: str, projects: Path) -> tuple[str, os.stat_result] | None:
                 except OSError:
                     continue
                 if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid():
-                    return entry.name, st
+                    return entry.name
     except OSError:
         return None
     return None
 
 
-def _read_tail(projects: Path, dirname: str, sid: str) -> tuple[bytes, os.stat_result] | None:
-    """Last TAIL_BYTES of the file, opened without following links, checked on the descriptor."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    pfd = sub = fd = -1
+def _read_tail(chain: _Chain) -> bytes | None:
+    """Last TAIL_BYTES of the already opened and checked file."""
+    fd, st = chain.fd, chain.st
     try:
-        pfd = os.open(os.fspath(projects), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-        sub = os.open(dirname, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                      dir_fd=pfd)
-        fd = os.open(f"{sid}.jsonl", flags, dir_fd=sub)
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
-            return None
         start = max(0, st.st_size - TAIL_BYTES)
         os.lseek(fd, start, os.SEEK_SET)
         chunks: list[bytes] = []
@@ -134,13 +171,9 @@ def _read_tail(projects: Path, dirname: str, sid: str) -> tuple[bytes, os.stat_r
         data = b"".join(chunks)
         if start > 0:  # the first line is cut mid-way
             _, _, data = data.partition(b"\n")
-        return data, st
+        return data
     except OSError:
         return None
-    finally:
-        for d in (fd, sub, pfd):
-            if d >= 0:
-                os.close(d)
 
 
 def _depth_ok(value: Any) -> bool:
@@ -250,7 +283,7 @@ def mask_phrases(text: str) -> str:
     Best effort and deliberately over-eager: a benign `key binding` loses a word. The result
     is never longer than the input.
     """
-    words = text.split(" ")
+    words = text.split()
     out: list[str] = []
     i = 0
     n = len(words)
@@ -280,12 +313,25 @@ def mask_phrases(text: str) -> str:
     return " ".join(out)
 
 
+def _spaces(text: str) -> str:
+    """One space for every whitespace run, before sanitizing removes control characters.
+
+    Newlines, tabs, NBSP, line separators and invisible format characters would otherwise be
+    deleted and glue a keyword to its value (`password\\nhunter2`).
+    """
+    flat = "".join(
+        " " if ch.isspace() or unicodedata.category(ch) in ("Zs", "Zl", "Zp", "Cf") else ch
+        for ch in text
+    )
+    return " ".join(flat.split())
+
+
 def _last_prompt(data: bytes) -> str | None:
     for doc in _entries_newest_first(data):
         text = _human_text(doc)
         if text is None:
             continue
-        text = mask_credentials(sanitize_text(text[:2000], 2000))
+        text = mask_credentials(sanitize_text(_spaces(text[:2000]), 2000))
         if not text:
             continue
         # Cut first: the phrase pass only ever sees PROMPT_CHARS characters.
@@ -326,23 +372,25 @@ def _task_label(sid: str, projects: Path, mode: str, now: float) -> str:
         return ""
     if _ID_RE.fullmatch(sid) is None:
         return ""
-    found = _locate_cached(sid, projects, now)
-    if found is None:
+    chain = _locate_cached(sid, projects, now)
+    if chain is None:
         return ""
-    dirname, st = found
-    key = (os.path.abspath(projects), sid, mode)
-    hit = _cache.get(key)
-    if hit is not None and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
-        _cache.move_to_end(key)
-        raw, mtime = hit[3], hit[2]
-    else:
-        got = _read_tail(projects, dirname, sid)
-        if got is None:
-            return ""
-        data, fst = got
-        raw = _last_tool(data) if mode == "activity" else _last_prompt(data)
-        mtime = fst.st_mtime
-        _remember(key, (fst.st_size, fst.st_mtime_ns, mtime, raw))
+    try:
+        st = chain.st
+        key = (os.path.abspath(projects), sid, mode)
+        hit = _cache.get(key)
+        if hit is not None and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+            _cache.move_to_end(key)
+            raw, mtime = hit[3], hit[2]
+        else:
+            data = _read_tail(chain)
+            if data is None:
+                return ""
+            raw = _last_tool(data) if mode == "activity" else _last_prompt(data)
+            mtime = st.st_mtime
+            _remember(key, (st.st_size, st.st_mtime_ns, mtime, raw))
+    finally:
+        chain.close()
     if raw is None:
         return ""
     suffix = _age_suffix(now - mtime) if mode == "activity" else ""
