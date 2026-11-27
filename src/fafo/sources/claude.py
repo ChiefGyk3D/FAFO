@@ -2,7 +2,8 @@
 
 Reads only files named <digits>.json. The registry JSON carries a peer token and a
 messaging socket path; both are dropped right after parsing and never leave this module.
-Transcripts and anything under the projects directory are never read.
+Transcript text is never collected. The optional task label (see transcript.py) reads only
+the tail of one transcript and keeps at most an 80 character redacted label.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from ..model import Proc, Session, Stamped
 from ..proccache import ProcCache
 from ..redact import mask_credentials, redact_argv, sanitize_text
 from ..source import Ctx, SourceResult
+from ..transcript import MODES, task_label
 
 DEFAULT_DIR = Path("~/.claude/sessions")
 MAX_FILE_BYTES = 64 * 1024
@@ -204,8 +206,15 @@ class ClaudeSource:
         psutil_mod: Any = psutil,
         git: GitRunner | None = None,
         cache: ProcCache | None = None,
+        projects_dir: Path | str | None = None,
+        task_labels: str = "activity",
     ) -> None:
         self.dir = Path(sessions_dir if sessions_dir is not None else DEFAULT_DIR).expanduser()
+        # The projects directory sits next to the registry unless named.
+        self.projects = (
+            Path(projects_dir).expanduser() if projects_dir is not None else self.dir.parent / "projects"
+        )
+        self.task_labels = task_labels if task_labels in MODES else "off"
         self.show_args = set(show_args or ())
         self.procs: ProcReader = proc_reader or ProcFsReader()
         self.ps = psutil_mod
@@ -379,6 +388,11 @@ class ClaudeSource:
         self.cache.end_cycle(self._seen)
         return result
 
+    def _label(self, sid: str, now: float) -> str:
+        if self.task_labels == "off":
+            return ""
+        return task_label(sid, self.projects, self.task_labels, now)
+
     def _add(
         self, result: SourceResult, e: dict, live: set[int], now: float, table, tree
     ) -> None:
@@ -397,8 +411,11 @@ class ClaudeSource:
         status = e.get("status")
         state = status if type(status) is str and status in _STATES else "unknown"
         waiting = _label(e.get("waitingFor"), MAX_TASK)
-        task = waiting or (state if state in _STATES else "")
         sid = e["sessionId"]
+        if state == "waiting" and waiting:
+            task = waiting
+        else:
+            task = self._label(sid, now) or waiting or (state if state in _STATES else "")
         result.sessions.append(
             Session(
                 pid=pid,

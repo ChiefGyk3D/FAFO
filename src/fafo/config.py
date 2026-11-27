@@ -21,11 +21,12 @@ MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
 TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
+TASK_LABEL_MODES = ("off", "activity", "prompt")
 SECRET_WORDS = ("token", "password", "secret", "key")
 
 # Source-specific option keys, per source. Anything else is an unknown key.
 OPTION_KEYS: dict[str, frozenset[str]] = {
-    "claude": frozenset({"sessions_dir"}),
+    "claude": frozenset({"sessions_dir", "task_labels"}),
     "ollama": frozenset({"url", "admission_log"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
@@ -223,6 +224,10 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
         n = f"{p}.{k}"
         if k in ("sessions_dir", "admission_log"):
             out[k] = _opt_path(v, n)
+        elif k == "task_labels":
+            if v not in TASK_LABEL_MODES:
+                raise _bad(n, "must be one of: " + ", ".join(TASK_LABEL_MODES))
+            out[k] = v
         elif k == "url":
             out[k] = _opt_text(v, n, MAX_URL_LEN)
         elif k == "repos":
