@@ -324,3 +324,21 @@ def test_sentinel_never_in_any_exception_chain_repr_or_log(tmp_path, caplog):
     seen += [repr(c), str(c), c.budget_text(), caplog.text, repr(c._tokens)]
     assert seen and all(TOKEN_A not in s for s in seen)
     assert all(str(tf) not in s for s in seen)
+
+
+def test_old_positional_form_binds_base_url_and_http(monkeypatch):
+    monkeypatch.setenv(ENV, ENV_TOKEN)
+    http = FakeHttp(ok())
+    c = GhClient(ENV, "https://ghe.example.invalid/api", http)
+    c.runs("o/r", "queued")
+    assert http.calls[0][1].startswith("https://ghe.example.invalid/api/repos/o/r/")
+    assert http.bearers() == [f"Bearer {ENV_TOKEN}"]
+
+
+def test_token_file_is_keyword_only(tmp_path):
+    tf = write_token(tmp_path / "tok", TOKEN_A)
+    with pytest.raises(TypeError):
+        GhClient(ENV, "https://api.github.com", FakeHttp(ok()), Clock(), 0.0, str(tf))
+    http = FakeHttp(ok())
+    GhClient(ENV, "https://api.github.com", http, token_file=str(tf)).runs("o/r", "queued")
+    assert http.bearers() == [f"Bearer {TOKEN_A}"]

@@ -242,11 +242,12 @@ class GhClient:
     def __init__(
         self,
         token_env: str,
-        token_file: str | None = None,
         base_url: str = "https://api.github.com",
         http: Http | None = None,
         clock: Callable[[], float] = time.time,
         min_interval_s: float = 10.0,
+        *,
+        token_file: str | None = None,
     ) -> None:
         parts = urlsplit(base_url)
         if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
