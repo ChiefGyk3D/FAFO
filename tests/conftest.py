@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -42,3 +43,31 @@ def group_kill_spy(monkeypatch):
     monkeypatch.setattr(subprocess.Popen, "wait", wait)
     monkeypatch.setattr(os, "killpg", killpg)
     return spy
+
+
+def pid_alive(pid: int) -> bool:
+    """True for a running process; a zombie (state Z) or a missing pid reads as gone.
+
+    os.kill(pid, 0) succeeds for a zombie, so the state is read from /proc/<pid>/stat. The
+    state follows the last ')' because the command name may itself contain ')' (proc(5)).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def wait_gone(pids, limit: float = 2.0) -> bool:
+    """Poll up to `limit` seconds (short sleeps) until no pid in `pids` is alive."""
+    end = time.monotonic() + limit
+    while True:
+        if not any(pid_alive(p) for p in pids):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.02)
