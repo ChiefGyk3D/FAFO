@@ -110,7 +110,7 @@ def test_check_finite_rejects_and_accepts():
 
 @pytest.mark.parametrize("builder", [nest_list, nest_dict])
 def test_check_finite_deep_input_low_limit(builder):
-    deep = builder(DEEP)
+    deep = builder(DEEP // 5)  # below the node cap, so only the depth cap can reject it
     with low_recursion_limit(), pytest.raises(ValueError):
         jsonsafe.check_finite(deep)
 
