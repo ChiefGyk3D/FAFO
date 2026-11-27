@@ -1,0 +1,34 @@
+FAFO  view 2s  load 4.1  cpu 20%  mem 61%  gpu 78%
+sources: claude ok 2s  runners stale 6s
+you are here: src-2 | beta-service | input needed | pid 200 | waiting
+
+SESSIONS
+  PID    NAME   PROJECT       TASK               STATE      ELAPSED  CPU  AGENT
+* 200    src-2  beta-service  input needed       waiting    1h12m    3%   claude
+    201                       ruff check                             1%   claude
+  100    src-1  reach-alpha   PR 482 review fix  busy       1h12m    3%   claude
+    101                       pytest -q                              1%   claude
+    102                       git log                                1%   claude
+  300    src-3  gamma-tool                       idle ~40s  1h12m    3%   claude
+
+UNATTACHED
+  PID   NAME       PROJECT  TASK        STATE  ELAPSED  CPU  AGENT    BRANCH
+  codex (1)
+   500                      codex exec                  1%   codex
+  gemini (1)
+   501                      gemini                      1%   gemini
+  copilot cloud (1)
+   -    agent-run  alpha    fix lint    busy   1h12m    3%   copilot  main
+
+LOCAL LLM
+  model-a:12b  8.0G  ctx 128k  exp 4m
+  queue 0  in-flight 1
+  in-flight model-a:12b  session src-1
+
+RUNNERS
+  RUNNER  STATE  REPO        WORKFLOW  JOB    STEP  ELAPSED  LOAD  MEM  DISK
+  r1      busy   owner/repo  ci        build  3/7   2m10s    3.2   61%  ?
+  r2      idle                                               ?     ?    ?
+
+QUOTA
+  claude  5h 41  wk 63
