@@ -44,6 +44,40 @@ the display half of `safo agents-status`.
   agent processes highlighted and attributed.
 - Never blanks under load. Stale data is dimmed with its age, never replaced.
 - Two renderers over one data source: full-screen TUI and a Claude Code pane.
+- "You are here" (owner request 2026-11-27): inside Claude the pane learns
+  its own session id (`$.session.id()`, verified in the mod API types of
+  Claude Code 2.1.332) and pins a banner at the very top: this session's
+  name, project, task, PID and state. Its row in the session list is
+  highlighted and marked. The standalone TUI takes `--session ID`, or
+  `--session auto`, which walks up the process tree from the command to the
+  nearest ancestor whose pid is a registered Claude session in the snapshot
+  (capped at 64 hops; no match means no banner). `auto` only works inside a
+  terminal started from a Claude session. Either form marks that row the
+  same way. A session with no match shows "unknown session",
+  never a guess. Whether the terminal tab title can also be set is not
+  verified (not found in the mod API); treated as a later spike.
+- Session addresses for manual cross-session messaging (owner request
+  2026-11-27): every Claude session row carries its full session id, its
+  name, PID and project, and the drill-in view shows the exact address a
+  person pastes into a send (`{ sessionId }`). `fafo --sessions` prints
+  name, id and project, one line per session, for scripts and copy-paste.
+  FAFO only DISPLAYS addresses; it never sends. Never collected or shown:
+  `peerToken`, the `.key` files, or any credential beside the registry
+  files. The messaging socket path is shown only in drill-in.
+- Grouped by session (owner request 2026-11-27): the default view groups
+  every process, subagent, Codex run and child command under the session
+  that owns it (a collapsible tree: session header, then its agents and
+  processes), with ungrouped system and runner processes in their own
+  groups. When there is more than one screen of data, the TUI paginates
+  into named views ("windows"): Sessions, Processes, Local LLM, Runners,
+  Quota, plus a per-session drill-in. Navigation: Tab/Shift-Tab or number
+  keys switch views, PgUp/PgDn and j/k scroll inside a view, `g`/`G` jump
+  to top/bottom, `/` filters, Enter drills into a session, Esc goes back.
+  A header shows "view 2/5" and a scroll position, so nothing is hidden
+  silently. Both the Claude Code pane and the Codex renderer use the same
+  view model and the same keys; the pane shows the compact variant of the
+  same views. Codex integration surface is verified before that renderer
+  is built.
 - Quota and rate-limit windows per provider where obtainable.
 - Optional SAFO and SHIT adapters add issue, board card, epic, effort, Kind
   to each session. Works fully without them.
@@ -195,8 +229,8 @@ verifies. Security review on the Daybreak tier before first release.
 - GitHub App token, read-only: Actions: read (run, job, step names; job names
   its runner). Pull requests: read only if docs confirm it is needed to link
   Copilot runs. Administration: read NOT requested (runner host view is ssh).
-- Pre-repo tracking: issue in AI-Shit (private), card on the homelab research
-  board (name confirmed at filing). Moves to the FAFO repo once created.
+- Pre-repo tracking: a private issue and board card under the FAFO epic.
+  Moves to the FAFO repo once created.
 
 ## Calls I made (flagged for owner)
 
