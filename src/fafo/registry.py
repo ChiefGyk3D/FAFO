@@ -2,8 +2,8 @@
 
 Fail fast: a misconfigured enabled source raises ConfigError naming it, with no values in the
 message. A source whose optional dependency is missing is skipped with a reason. The GitHub
-token is never read here: only the NAME of its environment variable is passed on, and the
-client reads the value from the real environment at call time. `env` is used only to check
+token is never read here: only the NAME of its environment variable and the path of its
+file are passed on, and the client reads the value at call time. `env` is used only to check
 that the variable is set.
 """
 
@@ -90,11 +90,16 @@ def _ollama(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
 
 
 def _client(scfg: SourceCfg, env: Mapping[str, str]) -> tuple[GhClient | None, str]:
-    """A GhClient when the token variable is set, else None. Returns (client, variable NAME)."""
+    """A GhClient when a token file is configured or the token variable is set, else None.
+
+    Returns (client, variable NAME). A configured token file always builds a client: an
+    unreadable or refused file is reported by doctor and the collector at call time.
+    """
     token_env = scfg.options.get("token_env", DEFAULT_TOKEN_ENV)
-    if not env.get(token_env):
+    token_file = scfg.options.get("token_file")
+    if not token_file and not env.get(token_env):
         return None, token_env
-    return GhClient(token_env), token_env
+    return GhClient(token_env, token_file=token_file), token_env
 
 
 def _runners(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:

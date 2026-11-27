@@ -27,8 +27,8 @@ SECRET_WORDS = ("token", "password", "secret", "key")
 OPTION_KEYS: dict[str, frozenset[str]] = {
     "claude": frozenset({"sessions_dir"}),
     "ollama": frozenset({"url", "admission_log"}),
-    "runners": frozenset({"repos", "token_env", "hosts"}),
-    "copilot": frozenset({"repos", "session_paths", "token_env"}),
+    "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
+    "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
 }
 HOST_KEYS = frozenset({"name", "ssh", "key_path", "repos"})
 MAX_PATH_LEN = 4096
@@ -97,6 +97,8 @@ _ALLOWED_SECRET_KEYS = frozenset(
     {
         "sources.runners.token_env",
         "sources.copilot.token_env",
+        "sources.runners.token_file",
+        "sources.copilot.token_file",
         "sources.runners.hosts.key_path",
     }
 )
@@ -153,6 +155,13 @@ def _opt_text(value: object, name: str, max_len: int) -> str:
 def _opt_path(value: object, name: str) -> str:
     if not isinstance(value, str) or not _path_ok(value):
         raise _bad(name, f"must be a plain path string of at most {MAX_PATH_LEN} characters")
+    return value
+
+
+def _opt_abs_path(value: object, name: str) -> str:
+    """An absolute path string for a secret file. The config never opens or reads it."""
+    if not isinstance(value, str) or not _path_ok(value) or not value.startswith("/"):
+        raise _bad(name, f"must be an absolute path string of at most {MAX_PATH_LEN} characters")
     return value
 
 
@@ -220,6 +229,8 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
             out[k] = _opt_repos(v, n)
         elif k == "token_env":
             out[k] = _opt_env(v, n)
+        elif k == "token_file":
+            out[k] = _opt_abs_path(v, n)
         elif k == "hosts":
             out[k] = _parse_hosts(v)
         elif k == "session_paths":
