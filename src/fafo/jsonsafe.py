@@ -100,9 +100,8 @@ def plain_copy(value) -> tuple[object, int]:
                 return v
         elif v is None or isinstance(v, (bool, str)):
             return v
-        elif isinstance(v, float):
-            if math.isfinite(v):
-                return v
+        elif isinstance(v, float) and math.isfinite(v):
+            return v
         replaced += 1
         return None
 
