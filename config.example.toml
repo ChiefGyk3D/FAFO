@@ -1,0 +1,37 @@
+# FAFO example configuration. Copy and edit. Every value here is a placeholder.
+# Secrets (API or GitHub tokens, passwords, keys) never go in this file:
+# FAFO reads them from environment variables and rejects the file if it finds one.
+
+# Where the collector writes the snapshot. Default when unset:
+# ${XDG_RUNTIME_DIR:-~/.local/state}/fafo/snapshot.json
+# snapshot_path = "~/.local/state/fafo/snapshot.json"
+
+# Command arguments shown in the process view. Everything else is shown as <arg>.
+show_args = ["exec", "resume", "--resume", "--model"]
+
+# One table per source: enabled, interval_s, timeout_s (positive numbers, seconds).
+[sources.host]
+enabled = true
+interval_s = 2
+timeout_s = 5
+
+[sources.claude]
+enabled = true
+interval_s = 2
+timeout_s = 5
+
+[sources.ollama]
+enabled = false
+interval_s = 5
+timeout_s = 3
+
+[sources.runners]
+enabled = false
+interval_s = 15
+timeout_s = 8
+
+# Hostnames and IPs are replaced by these aliases before anything is written.
+[aliases]
+"ai-server.example.invalid" = "ai-server"
+"runner-1.example.invalid" = "runner-1"
+"192.0.2.10" = "runner-2"
