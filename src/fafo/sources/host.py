@@ -15,12 +15,12 @@ import math
 import os
 import selectors
 import shutil
-import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from fafo.procutil import kill_and_reap, wait_exited_unreaped
 from fafo.redact import sanitize_text
 from fafo.source import Ctx, SourceResult
 
@@ -115,21 +115,19 @@ def _run_capped(argv: Sequence[str], timeout_s: float, env: Mapping[str, str]) -
                     break
                 buf += chunk
         if len(buf) <= MAX_GPU_OUTPUT:
-            code = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if not wait_exited_unreaped(proc, deadline - time.monotonic()):
+                raise subprocess.TimeoutExpired(list(argv), timeout_s)
+            kill_and_reap(proc)  # exited: kill any grandchild, then reap
+            code = proc.returncode
+            if code is None:
+                raise subprocess.TimeoutExpired(list(argv), timeout_s)
             if code != 0:
                 raise subprocess.CalledProcessError(code, list(argv))
         return bytes(buf)
     finally:
-        try:  # before reaping, so the group id cannot have been reused
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_and_reap(proc)  # kill the group before the reap, never after
         if proc.stdout is not None:
             proc.stdout.close()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 def _num(text: str) -> int | float | None:

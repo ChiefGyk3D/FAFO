@@ -316,3 +316,34 @@ def test_global_git_config_cannot_supply_remote(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     r = make_repo(tmp_path / "toplevelname")
     assert attribute(str(r), []) == ("toplevelname", "cwd-git")
+
+
+def test_normal_exit_kills_group_once_before_reap(tmp_path: Path, group_kill_spy):
+    d = tmp_path / "w"
+    d.mkdir()
+    script = tmp_path / "fastgit"
+    script.write_text("#!/bin/sh\necho hello\n")
+    script.chmod(0o700)
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
+    kills = group_kill_spy.kills()
+    assert len(kills) == 1
+    assert group_kill_spy.events[0] == kills[0]  # no wait before the kill
+    assert group_kill_spy.reaped_when_killed == []
+
+
+def test_normal_exit_leaves_no_grandchild(tmp_path: Path):
+    d = tmp_path / "w"
+    d.mkdir()
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "leaver"
+    script.write_text(
+        f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho hello\n"
+    )
+    script.chmod(0o700)
+    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3) == "hello"
+    child = int(pidfile.read_text())
+    for _ in range(60):
+        if not _alive(child):
+            break
+        time.sleep(0.05)
+    assert not _alive(child)
