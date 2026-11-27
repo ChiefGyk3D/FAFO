@@ -131,6 +131,6 @@ def test_example_config_loads_and_has_only_placeholders():
     text = (root / "config.example.toml").read_text(encoding="utf-8")
     cfg = load_config(root / "config.example.toml")
     assert cfg.aliases
-    assert "—" not in text
+    assert chr(0x2014) not in text
     for host in cfg.aliases:
         assert host.endswith(".invalid") or host.startswith(("192.0.2.", "198.51.100."))
