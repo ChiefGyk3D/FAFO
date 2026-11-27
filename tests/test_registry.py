@@ -338,3 +338,95 @@ def test_token_failure_in_transport_does_not_leak(tmp_path, monkeypatch, caplog)
         texts.append(str(e) + repr(e))
         e = e.__cause__ or e.__context__
     assert SENTINEL not in " ".join(texts) + caplog.text
+
+
+class _NoCollect:
+    name = "codex"
+
+
+class _NameNone:
+    name = None
+
+    def collect(self, ctx):
+        return SourceResult()
+
+
+class _NameInt(_NameNone):
+    name = 123
+
+
+class _NameLong(_NameNone):
+    name = "a" * 100
+
+
+class _NameSpaces(_NameNone):
+    name = "co dex"
+
+
+class _NameUpper(_NameNone):
+    name = "Codex"
+
+
+class _NameList(_NameNone):
+    @property
+    def name(self):
+        return ["codex"]  # unhashable
+
+
+class _NameRaises(_NameNone):
+    @property
+    def name(self):
+        raise RuntimeError("SENTINEL-SECRET-VALUE")
+
+
+class _CollectNotCallable:
+    name = "codex"
+    collect = 5
+
+
+BAD_RESULTS = [
+    lambda: None,
+    lambda: 7,
+    lambda: "SENTINEL-str",
+    _NameNone,
+    _NameInt,
+    _NameLong,
+    _NameSpaces,
+    _NameUpper,
+    _NameList,
+    _NameRaises,
+    _NoCollect,
+    _CollectNotCallable,
+]
+
+
+def _chain(exc):
+    out = []
+    while exc is not None:
+        out.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    return out
+
+
+@pytest.mark.parametrize("make", BAD_RESULTS)
+def test_bad_factory_result_is_value_free_config_error(tmp_path, make, caplog):
+    caplog.set_level(logging.DEBUG)
+    cfg = only(tmp_path, "codex")
+    with pytest.raises(ConfigError) as ei:
+        build_sources(cfg, {}, factories={"codex": lambda s, c, e: make()})
+    chain = _chain(ei.value)
+    assert len(chain) == 1
+    assert "sources.codex: invalid source object (" in str(ei.value)
+    blob = "".join(str(x) + repr(x) + repr(x.args) for x in chain) + caplog.text
+    assert "SENTINEL" not in blob
+
+
+def test_bad_result_in_second_source_does_not_hide_behind_duplicate_check(tmp_path):
+    cfg = cfg_from(tmp_path, "[sources.codex]\n[sources.gemini]\n")
+    cfg = dataclasses.replace(
+        cfg,
+        sources={k: dataclasses.replace(v, enabled=k in ("codex", "gemini")) for k, v in cfg.sources.items()},
+    )
+    f = {"codex": lambda s, c, e: Stub("codex"), "gemini": lambda s, c, e: _NameList()}
+    with pytest.raises(ConfigError, match="sources.gemini"):
+        build_sources(cfg, {}, factories=f)

@@ -437,3 +437,36 @@ def test_factory_failure_never_leaks_through_cli(tmp_path, capsys, caplog, cmd):
     assert "sources.codex" in err and "RuntimeError" in err
     assert "SENTINEL" not in out + err + caplog.text
     assert not snap.exists()
+
+
+@pytest.mark.parametrize("cmd", ["run", "doctor"])
+@pytest.mark.parametrize("which", ["none", "name_raises", "no_collect"])
+def test_bad_factory_result_exit_2_through_cli(tmp_path, capsys, caplog, cmd, which):
+    class Raises:
+        @property
+        def name(self):
+            raise RuntimeError("SENTINEL-SECRET-VALUE")
+
+        def collect(self, ctx):
+            return SourceResult()
+
+    class NoCollect:
+        name = "codex"
+
+    made = {"none": lambda: None, "name_raises": Raises, "no_collect": NoCollect}[which]
+    caplog.set_level("DEBUG")
+    snap = tmp_path / "s.json"
+    argv = [cmd, "--config", str(conf(tmp_path, "codex"))]
+    if cmd == "run":
+        argv += ["--snapshot", str(snap)]
+    # Guard: if a regression lets `run` start the collector, stop it instead of hanging.
+    guard = threading.Timer(3.0, os.kill, (os.getpid(), signal.SIGTERM))
+    guard.start()
+    try:
+        code, out, err = run_main(argv, {"codex": lambda s, c, e: made()}, capsys)
+    finally:
+        guard.cancel()
+    assert code == 2
+    assert "sources.codex" in err and "invalid source object" in err
+    assert "SENTINEL" not in out + err + caplog.text
+    assert not snap.exists()

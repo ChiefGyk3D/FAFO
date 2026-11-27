@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any
 
 from .config import SOURCE_NAMES, Config, ConfigError, SourceCfg
 from .ghapi import GhClient
+from .redact import sanitize_text
 from .source import Source
 from .sources.claude import ClaudeSource
 from .sources.codex import CodexSource
@@ -130,6 +132,23 @@ SOURCE_FACTORIES: dict[str, Factory] = {
 }
 
 
+_NAME_OK = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+
+
+def _class_name(obj: object) -> str:
+    return sanitize_text(type(obj).__name__, 40)
+
+
+def _source_name(src: object) -> str | None:
+    """The source's name if `src` looks like a Source, else None. Never raises."""
+    try:
+        name = src.name
+        ok = isinstance(name, str) and _NAME_OK.fullmatch(name) is not None
+        return name if ok and callable(getattr(src, "collect", None)) else None
+    except Exception:  # noqa: BLE001 - a hostile or broken object is just "invalid"
+        return None
+
+
 def build(
     cfg: Config, env: Mapping[str, str], factories: Mapping[str, Factory] | None = None
 ) -> BuildResult:
@@ -141,7 +160,7 @@ def build(
             raise ConfigError(f"unknown source '{name}'")
     res = BuildResult()
     seen: set[str] = set()
-    built: list[tuple[str, Source]] = []
+    built: list[tuple[str, str]] = []
     order = [n for n in SOURCE_NAMES if n in cfg.sources]
     order += [n for n in cfg.sources if n not in SOURCE_NAMES]
     for name in order:
@@ -162,18 +181,21 @@ def build(
             raise
         except Exception as exc:  # noqa: BLE001 - any factory failure is a config problem
             failed = type(exc).__name__  # the class name only: the text may hold a value
-        if src is None:
+        if failed:
             # Raised outside the except block so the original exception is not chained.
             raise ConfigError(f"sources.{name}: invalid configuration ({failed})")
-        if src.name in seen:
-            raise ConfigError(f"duplicate source name '{src.name}'")
-        seen.add(src.name)
-        built.append((name, src))
+        ok_name = _source_name(src)
+        if ok_name is None:
+            raise ConfigError(f"sources.{name}: invalid source object ({_class_name(src)})")
+        if ok_name in seen:
+            raise ConfigError(f"duplicate source name '{ok_name}'")
+        seen.add(ok_name)
+        built.append((name, ok_name))
         res.sources.append(src)
         if name == "runners" and getattr(src, "gh", 1) is None:
             res.notes[name] = "GitHub token variable not set: job data unavailable, ssh only"
-    for name, src in built:
-        if src.name != name:
+    for name, built_name in built:
+        if built_name != name:
             raise ConfigError(f"sources.{name}: built a source with a different name")
     return res
 
