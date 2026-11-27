@@ -50,7 +50,7 @@ class FakeTasks:
 def _run(rid, status="in_progress", **kw):
     base = {
         "id": rid, "name": "Run", "event": "dynamic", "actor": {"login": "Copilot"},
-        "head_branch": "b", "status": status, "path": "dynamic/x",
+        "head_branch": "b", "status": status, "path": REVIEW_PATH,
         "run_started_at": "2026-11-27T12:00:00Z",
     }
     base.update(kw)
@@ -66,12 +66,18 @@ def test_name_and_capability():
     assert copilot.CAPABILITY.startswith("partial:")
 
 
-def test_reviewer_run_classified_review_and_unverified_is_session():
+def test_reviewer_review_and_configured_path_is_session():
     res = _collect(_load("copilot_runs.json"))
     by_id = {s.session_id: s for s in res.sessions}
-    assert set(by_id) == {"run-1001", "run-1002"}
+    assert set(by_id) == {"run-1001"}
     assert by_id["run-1001"].task.startswith("review")
-    assert by_id["run-1002"].task.startswith("session (unverified)")
+    sessions = CopilotSource(
+        FakeRuns(_load("copilot_runs.json")), [REPO],
+        session_paths=frozenset({"dynamic/copilot-swe-agent/copilot"}),
+    ).collect(_ctx()).sessions
+    by_id = {s.session_id: s for s in sessions}
+    assert set(by_id) == {"run-1001", "run-1002"}
+    assert by_id["run-1002"].task.startswith("session:")
 
 
 def test_non_copilot_work_excluded():
@@ -82,7 +88,9 @@ def test_non_copilot_work_excluded():
 
 
 def test_state_mapping_and_fields():
-    res = _collect(_load("copilot_runs.json"))
+    runs = [_run(1001, path=REVIEW_PATH, head_branch="feature/x"),
+            _run(1002, status="queued", path=REVIEW_PATH)]
+    res = _collect(runs)
     by_id = {s.session_id: s for s in res.sessions}
     assert by_id["run-1001"].state == "busy"
     assert by_id["run-1002"].state == "waiting"
@@ -172,7 +180,7 @@ def test_agent_tasks_exception_propagates():
 
 
 def test_agent_tasks_fixture_states_and_terminal_dropped():
-    sessions = parse_agent_tasks(_load("agent_tasks.json"), now=NOW)
+    sessions = parse_agent_tasks(_load("agent_tasks.json"), now=NOW, repos=[REPO])
     by_id = {s.session_id: s for s in sessions}
     assert set(by_id) == {"task-t-1", "task-t-2", "task-t-3", "task-t-4"}
     assert by_id["task-t-1"].state == "busy"
@@ -186,13 +194,16 @@ def test_agent_tasks_fixture_states_and_terminal_dropped():
 
 def test_agent_tasks_cap_and_garbage():
     tasks = [{"id": str(i), "state": "queued"} for i in range(150)]
-    assert len(parse_agent_tasks(tasks, now=NOW)) == 100
-    junk = [None, 3, {"id": 1, "state": "queued"}, {"id": "a", "state": "weird"},
-            {"id": "b"}, {"id": "ok", "state": "idle", "artifacts": "nope"}]
-    out = parse_agent_tasks(junk, now=NOW)
+    for t in tasks:
+        t["repo"] = REPO
+    assert len(parse_agent_tasks(tasks, now=NOW, repos=[REPO])) == 100
+    junk = [None, 3, {"id": 1, "state": "queued", "repo": REPO},
+            {"id": "a", "state": "weird", "repo": REPO}, {"id": "b", "repo": REPO},
+            {"id": "ok", "state": "idle", "artifacts": "nope", "repo": REPO}]
+    out = parse_agent_tasks(junk, now=NOW, repos=[REPO])
     assert [s.session_id for s in out] == ["task-ok"]
-    assert parse_agent_tasks("nonsense", now=NOW) == []
-    assert parse_agent_tasks({"tasks": "x"}, now=NOW) == []
+    assert parse_agent_tasks("nonsense", now=NOW, repos=[REPO]) == []
+    assert parse_agent_tasks({"tasks": "x"}, now=NOW, repos=[REPO]) == []
 
 
 def test_agent_tasks_used_when_supplied_and_merged_with_runs():
@@ -202,3 +213,39 @@ def test_agent_tasks_used_when_supplied_and_merged_with_runs():
     assert ids == {"run-9", "task-t-1", "task-t-2", "task-t-3", "task-t-4"}
     only = CopilotSource(None, [REPO], agent_tasks=FakeTasks(_load("agent_tasks.json")))
     assert len(only.collect(_ctx()).sessions) == 4
+
+
+def test_unknown_dynamic_path_counted_not_shown(caplog):
+    runs = [_run(1, path="dynamic/copilot-swe-agent/copilot"), _run(2, path="dynamic/other"),
+            _run(3, path="dynamic/" + "x" * 300), _run(4)]
+    src = CopilotSource(FakeRuns(runs), [REPO])
+    with caplog.at_level(logging.DEBUG, logger="t"):
+        res = src.collect(_ctx())
+    assert [s.session_id for s in res.sessions] == ["run-4"]
+    assert src.unclassified == 3
+    assert "x" * 121 not in caplog.text
+    src.collect(_ctx())
+    assert src.unclassified == 3  # reset per collect, not accumulated
+
+
+def test_unclassified_count_capped():
+    runs = [_run(i, path=f"dynamic/p{i}") for i in range(1, 60)]
+    src = CopilotSource(FakeRuns(runs), [REPO])
+    src.collect(_ctx())
+    assert 0 < src.unclassified <= copilot.MAX_UNCLASSIFIED
+
+
+def test_agent_tasks_filtered_to_configured_repos():
+    tasks = [
+        {"id": "a", "state": "queued", "repo": "example-org/example-repo"},
+        {"id": "b", "state": "queued", "repo": "example-org/other-repo"},
+        {"id": "c", "state": "queued"},
+        {"id": "d", "state": "queued", "repo": 5},
+    ]
+    out = parse_agent_tasks(tasks, now=NOW, repos=[REPO])
+    assert [s.session_id for s in out] == ["task-a"]
+    assert out[0].project.value == "example-repo"
+    assert "other-repo" not in json.dumps([s.project.value for s in out])
+    assert parse_agent_tasks(tasks, now=NOW, repos=[]) == []
+    src = CopilotSource(None, [], agent_tasks=FakeTasks(tasks))
+    assert src.collect(_ctx()).sessions == []
