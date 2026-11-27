@@ -1,0 +1,22 @@
+[
+  {"id": 1001, "name": "Running Copilot Code Review", "event": "dynamic",
+   "actor": {"login": "Copilot"}, "head_branch": "feature/x", "status": "in_progress",
+   "conclusion": null, "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_started_at": "2026-11-27T12:00:00Z"},
+  {"id": 1002, "name": "Copilot coding agent", "event": "dynamic",
+   "actor": {"login": "Copilot"}, "head_branch": "copilot/fix-1", "status": "queued",
+   "conclusion": null, "path": "dynamic/copilot-swe-agent/copilot",
+   "run_started_at": "2026-11-27T12:05:00Z"},
+  {"id": 1003, "name": "CI", "event": "pull_request",
+   "actor": {"login": "Copilot"}, "head_branch": "copilot/fix-1", "status": "in_progress",
+   "conclusion": null, "path": ".github/workflows/ci.yml",
+   "run_started_at": "2026-11-27T12:06:00Z"},
+  {"id": 1004, "name": "Dynamic by a person", "event": "dynamic",
+   "actor": {"login": "someone"}, "head_branch": "main", "status": "in_progress",
+   "conclusion": null, "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_started_at": "2026-11-27T12:07:00Z"},
+  {"id": 1005, "name": "Dynamic outside dynamic path", "event": "dynamic",
+   "actor": {"login": "Copilot"}, "head_branch": "main", "status": "in_progress",
+   "conclusion": null, "path": ".github/workflows/x.yml",
+   "run_started_at": "2026-11-27T12:08:00Z"}
+]
