@@ -204,7 +204,9 @@ class ClaudeSource:
         psutil_mod: Any = psutil,
         git: GitRunner | None = None,
         cache: ProcCache | None = None,
+        args_mode: str = "allowlist",
     ) -> None:
+        self.args_mode = args_mode
         self.dir = Path(sessions_dir if sessions_dir is not None else DEFAULT_DIR).expanduser()
         self.show_args = set(show_args or ())
         self.procs: ProcReader = proc_reader or ProcFsReader()
@@ -334,7 +336,9 @@ class ClaudeSource:
                 ppid=int(p.ppid()),
                 session_pid=session_pid,
                 agent=_agent_of(argv, p.name()),
-                cmd=redact_argv(argv, self.show_args, value_flags=VALUE_FLAGS),
+                cmd=redact_argv(
+                    argv, self.show_args, value_flags=VALUE_FLAGS, mode=self.args_mode
+                ),
                 cpu=self._child_cpu(p),
                 rss=max(0, int(p.memory_info().rss)),
                 started=max(0.0, float(p.create_time())),

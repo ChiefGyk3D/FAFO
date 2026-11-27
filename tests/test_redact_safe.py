@@ -1,0 +1,413 @@
+"""Safe mode of redact_argv (args_mode = "safe"): conservative display of command lines.
+
+Every rule has a table case, the hostile fixtures run through both modes, and a generated
+property test proves the output alphabet and length bounds.
+"""
+
+import json
+import random
+import re
+import time
+from pathlib import Path
+
+import pytest
+from test_redact_hardening import ADVERSARIAL, _assert_scales_linearly
+from test_redact_round3 import LEAK_CASES
+
+from fafo.redact import MAX_TOKEN_LEN, redact_argv
+
+FIXTURES = Path(__file__).parent / "fixtures"
+ESC = chr(0x1B)
+BEL = chr(7)
+ZW = chr(0x200B)
+E_ACUTE = chr(0xE9)
+SP = " "
+CAFE = "caf" + E_ACUTE
+LONG41 = "x" * 41
+OPT39 = "a" * 39
+MODEL_VF = frozenset({"--model"})
+
+
+def safe(argv, show=(), vf=frozenset()):
+    return redact_argv(argv, set(show), value_flags=vf, mode="safe")
+
+
+# (id, argv, expected output). show_args is empty unless the case says so below.
+TABLE = [
+    ("python script", ["python3", "script.py", "arg"], "python3 script.py arg"),
+    ("python -m", ["python", "-m", "pytest", "tests"], "python -m pytest tests"),
+    ("node script", ["node", "app.js"], "node app.js"),
+    ("bash -c shows only script", ["bash", "-c", 'curl -H "Authorization: Bearer x" url'],
+     "bash -c <script>"),
+    ("bash -lc cluster", ["/bin/bash", "-lc", "echo hi"], "bash -c <script>"),
+    ("bash -c hides trailing args", ["bash", "-c", "x", "status", "y"], "bash -c <script>"),
+    ("node -e", ["node", "-e", "console.log(1)"], "node -e <script>"),
+    ("git commit message", ["git", "commit", "-m", "message with secret"], "git commit -m <arg>"),
+    ("ssh key path basename", ["ssh", "-i", "~/.ssh/key", "host"], "ssh -i <arg> host"),
+    ("docker env", ["docker", "run", "--rm", "-e", "TOKEN=abc", "image"],
+     "docker run --rm -e <arg> image"),
+    ("url with userinfo", ["curl", "https://user:pw@host.example.invalid/x"], "curl <arg>"),
+    ("url plain", ["curl", "https://host.example.invalid/x"], "curl <arg>"),
+    ("mysql glued password", ["mysql", "-psecret"], "mysql <arg>"),
+    ("mysql glued password not secret-named", ["mysql", "-phunter2"], "mysql <arg>"),
+    ("aws s3 uri and relative path", ["aws", "s3", "cp", "s3://bucket/key", "./file"],
+     "aws s3 cp <arg> file"),
+    ("pip requirements", ["pip", "install", "-r", "requirements.txt"],
+     "pip install -r <arg>"),
+    ("env words stay env", ["FOO=bar", "BAZ=1", "make", "build"], "<env> <env> make build"),
+    ("secret flag then value", ["tool", "--token", "abc"], "tool <arg> <arg>"),
+    ("secret flag equals", ["tool", "--token=abc"], "tool <arg>"),
+    ("short secret flag then value", ["tool", "-p", "secret"], "tool <arg> <arg>"),
+    ("api-key flag then value", ["tool", "--api-key", "abc"], "tool <arg> <arg>"),
+    ("follower only skips one", ["tool", "--password", "x", "status"], "tool <arg> <arg> status"),
+    ("follower equals form", ["tool", "--password=x", "status"], "tool <arg> status"),
+    ("bearer header words", ["tool", "-H", "Authorization:", "Bearer", "abc"],
+     "tool -H <arg> <arg> <arg>"),
+    ("plain flag", ["tool", "--verbose"], "tool --verbose"),
+    ("flag equals value hidden", ["tool", "--level=3"], "tool --level=<arg>"),
+    ("bad flag shape", ["tool", "--bad_flag", "x"], "tool <arg> <arg>"),
+    ("overlong flag name", ["tool", "--" + "a" * 40], "tool <arg>"),
+    ("short cluster", ["tool", "-xvf", "a.tar"], "tool -xvf <arg>"),
+    ("absolute path basename", ["tool", "/etc/hosts"], "tool hosts"),
+    ("home path basename", ["tool", "~/x"], "tool x"),
+    ("path with space", ["tool", "/home/u/my dir/x"], "tool <arg>"),
+    ("dotdot relative", ["tool", "../x"], "tool <arg>"),
+    ("trailing slash path", ["tool", "/tmp/"], "tool <arg>"),
+    ("at sign", ["tool", "a@b"], "tool <arg>"),
+    ("equals", ["tool", "a=b"], "tool <arg>"),
+    ("dollar", ["tool", "$HOME"], "tool <arg>"),
+    ("backtick", ["tool", "`id`"], "tool <arg>"),
+    ("quotes", ["tool", "'quoted'"], "tool <arg>"),
+    ("known token prefix", ["tool", "ghp_abcdefghijklmnop"], "tool <arg>"),
+    ("jwt prefix", ["tool", "eyJhbGciOi"], "tool <arg>"),
+    ("base64-ish with digits", ["tool", "aGh1bnRlcjIxMjM0NTY3ODkw"], "tool <arg>"),
+    ("over 40 chars", ["tool", LONG41], "tool <arg>"),
+    ("39 letters shown", ["tool", OPT39], "tool " + OPT39),
+    ("40 letters hit the long-run check", ["tool", "a" * 40], "tool <arg>"),
+    ("over token cap", ["tool", "A" * (MAX_TOKEN_LEN + 1)], "tool <arg>"),
+    ("non-ascii", ["tool", CAFE], "tool <arg>"),
+    ("control char stripped before deciding", ["tool", "a" + BEL + "b"], "tool ab"),
+    ("escape sequence stripped", ["tool", ESC + "[31mred"], "tool red"),
+    ("zero width stripped", ["tool", "a" + ZW + "b"], "tool ab"),
+    ("flag value hidden", ["tool", "--port", "8080", "status"], "tool --port <arg> status"),
+    ("flag value hidden name", ["tool", "--name", "hunter2"], "tool --name <arg>"),
+    ("flag value hidden user", ["tool", "--user", "bob"], "tool --user <arg>"),
+    ("flag value hidden pwfile", ["tool", "--password-file", "x"], "tool <arg> <arg>"),
+    ("short flag value hidden", ["tool", "-n", "hunter2", "run"], "tool -n <arg> run"),
+    ("node flag then script hidden", ["node", "--inspect", "app.js"], "node --inspect <arg>"),
+    ("python flag then script hidden", ["python", "-u", "script.py", "x"], "python -u <arg> x"),
+    ("python -oefoo attached value", ["python", "-Wecfoo"], "python -e <script>"),
+    ("combinable cluster shown", ["ls", "-la"], "ls -la"),
+    ("attached value -mfoo", ["tool", "-mfoo"], "tool <arg>"),
+    ("attached value -uroot", ["tool", "-uroot"], "tool <arg>"),
+    ("uppercase after first", ["tool", "-xV"], "tool <arg>"),
+    ("bash -cpass attached", ["bash", "-cpass"], "bash -c <script>"),
+    ("python -efoo attached", ["python", "-efoo"], "python -e <script>"),
+    ("bash -lcpass attached", ["bash", "-lcpass"], "bash -c <script>"),
+    ("node -eXYZ attached", ["node", "-eXYZ"], "node -e <script>"),
+    ("python -ec cluster", ["python3", "-ec", "x"], "python3 -e <script>"),
+    ("attached secret tail", ["sh", "-cghp_abcdefghijklmnop"], "sh -c <script>"),
+    ("attached equals tail", ["bash", "-cfoo=bar", "next"], "bash -c <script>"),
+    ("eval equals form", ["node", "--eval=1+1", "next"], "node --eval <script>"),
+    ("option terminator then word", ["cmd", "--", "word"], "cmd -- word"),
+    ("git checkout terminator", ["git", "checkout", "--", "file"], "git checkout -- file"),
+    ("terminator then secret flag", ["cmd", "--", "--token", "abc"], "cmd -- <arg> <arg>"),
+    ("terminator then url", ["cmd", "--", "https://h.example.invalid/x"], "cmd -- <arg>"),
+    ("terminator then script", ["python", "--", "run.py"], "python -- run.py"),
+    ("bare words", ["tool", "status", "run", "tests"], "tool status run tests"),
+    ("python module with dots and port", ["python3.11", "-m", "http.server", "8000"],
+     "python3.11 -m http.server 8000"),
+    ("python bad module", ["python3", "-m", "bad module"], "python3 -m <arg>"),
+    ("python script path basename", ["python", "/opt/app/run.py", "--port", "8"],
+     "python run.py --port <arg>"),
+    ("python relative script basename", ["python", "scripts/run.py"], "python run.py"),
+    ("python url as script", ["python", "-u", "https://x.example.invalid/y"],
+     "python -u <arg>"),
+    ("uv run", ["uv", "run", "script.py"], "uv run script.py"),
+    ("exe with credential shape", ["ghp_abcdefghijklmnop", "x"], "<exe> x"),
+    ("empty argv", [], ""),
+    ("non-str items", ["tool", None, 5, b"raw"], "tool <arg> <arg> <arg>"),
+    ("twelve token cap", ["tool", *["a"] * 20], "tool " + "a " * 10 + "a ..."),
+]
+
+
+def test_table_has_enough_cases():
+    assert len(TABLE) >= 40
+
+
+@pytest.mark.parametrize("argv,want", [(a, w) for _, a, w in TABLE], ids=[c[0] for c in TABLE])
+def test_safe_table(argv, want):
+    assert safe(argv) == want
+
+
+def test_every_table_case_is_unchanged_in_default_mode_signature():
+    """Default (allowlist) mode is selected when mode is omitted, and shows nothing extra."""
+    for _, argv, _ in TABLE:
+        assert redact_argv(argv, set()) == redact_argv(argv, set(), mode="allowlist")
+    assert redact_argv(["python3", "script.py", "arg"], set()) == "python3 <arg> <arg>"
+
+
+def test_unknown_mode_is_refused():
+    with pytest.raises(ValueError):
+        redact_argv(["tool"], set(), mode="verbose")
+
+
+def test_mode_is_keyword_only():
+    with pytest.raises(TypeError):
+        redact_argv(["tool"], set(), frozenset(), "safe")
+
+
+# ---- Named tests that carry the isolated revert proofs ----
+
+
+def test_positional_shape_check_rejects_url_and_at():
+    """Revert proof 1: dropping the safe-shape check on positionals makes this fail."""
+    for tok in ("https://u:pw@h.example.invalid/x", "user@host.example.invalid", "a:b", "a=b"):
+        assert safe(["tool", tok]) == "tool <arg>", tok
+
+
+def test_secret_named_flag_follower_is_hidden():
+    """Revert proof 2: dropping the follower rule makes this fail."""
+    assert safe(["mysql", "-p", "hunter2"]) == "mysql <arg> <arg>"
+    assert safe(["tool", "--token", "abc"]) == "tool <arg> <arg>"
+    assert safe(["tool", "--auth", "abc", "--client-secret", "def"]) == "tool <arg> <arg> <arg> <arg>"
+
+
+def test_flag_values_are_never_echoed():
+    for flag, val in (("--name", "hunter2"), ("--user", "bob"), ("--password-file", "x"),
+                      ("-n", "hunter2"), ("--port", "8080")):
+        out = safe(["tool", flag, val])
+        assert val not in out, out
+        assert out.split(SP)[-1] == "<arg>"
+
+
+def test_shown_valueless_flag_still_hides_next_word():
+    out = safe(["tool", "--verbose", "hunter2"], show={"--verbose"})
+    assert out == "tool --verbose <arg>"
+
+
+def test_attached_code_flag_tail_is_never_shown_property():
+    rng = random.Random(683)
+    tails = [*SECRETS, "pass", "foo", "XYZ", "x", "1", "hunter2", "$(id)"]
+    count = 0
+    for _ in range(3000):
+        pre = "".join(rng.choice("lxsbvuH") for _ in range(rng.randrange(0, 3)))
+        code = rng.choice("ce")
+        tail = rng.choice(tails)
+        tok = "-" + pre + code + tail
+        for exe in ("bash", "python3", "node", "sh"):
+            out = safe([exe, tok, "next"])
+            count += 1
+            assert out == f"{exe} -{code} <script>", (tok, out)
+            assert tail not in out.split(SP)[1:] and "next" not in out
+    assert count == 12000
+
+
+def test_attached_short_value_is_never_echoed_property():
+    rng = random.Random(684)
+    switches = "vxlarfhqstzind"
+    others = "bcjkmopuwyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789e"
+    count = 0
+    for _ in range(3000):
+        first = rng.choice("pxmuoHWvl")
+        rest = [rng.choice(switches) for _ in range(rng.randrange(1, 4))]
+        bad = rng.choice(others)
+        rest.insert(rng.randrange(len(rest) + 1), bad)
+        tok = "-" + first + "".join(rest)
+        if len(tok) - 1 > 5:
+            continue
+        count += 1
+        assert safe(["tool", tok, "status"]) == "tool <arg> <arg>", tok
+    assert count > 2000
+    # positive control: all-switch clusters up to five letters are shown
+    for _ in range(300):
+        tok = "-x" + "".join(rng.choice(switches) for _ in range(rng.randrange(1, 4)))
+        assert safe(["tool", tok]) == "tool " + tok, tok
+
+
+def test_code_flag_guard_bites_on_non_interpreters():
+    """Negative case: outside the interpreter list the cluster rule does not apply."""
+    assert safe(["tool", "-cpass"]) == "tool <arg>"
+
+
+def test_terminator_sets_no_flag_state():
+    assert safe(["tool", "--", "status"]) == "tool -- status"
+    assert safe(["tool", "--token", "--", "status"]) == "tool <arg> -- status"
+
+
+# ---- Explicitly shown arguments keep their allowlist behavior ----
+
+
+def test_shown_value_flag_keeps_value_in_safe_mode():
+    out = safe(["codex", "--model", "gpt-5", "exec", "go"], show={"--model", "exec"}, vf=MODEL_VF)
+    assert out == "codex --model gpt-5 exec go"
+    assert safe(["codex", "--model=gpt-5"], show={"--model"}, vf=MODEL_VF) == "codex --model=gpt-5"
+
+
+def test_shown_value_is_still_masked_in_safe_mode():
+    out = safe(["tool", "--model", "ghp_abcdefghijklmnop"], show={"--model"}, vf=MODEL_VF)
+    assert out == "tool --model <redacted>"
+
+
+# ---- Hostile fixtures through both modes ----
+
+
+def _fixture_cases():
+    cases = []
+    for name in ("argv_secrets.json", "argv_secrets_round2.json"):
+        cases += json.loads((FIXTURES / name).read_text())
+    return cases
+
+
+CASES = _fixture_cases()
+
+
+def test_fixture_cases_collected():
+    assert len(CASES) >= 30
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_fixtures_same_in_allowlist_and_safe_never_leaks(case):
+    show = set(case["show"])
+    vf = frozenset(a for a in case["show"] if a.startswith("-"))
+    default_out = redact_argv(case["argv"], show, value_flags=vf)
+    assert redact_argv(case["argv"], show, value_flags=vf, mode="allowlist") == default_out
+    out = safe(case["argv"], show=show, vf=vf)
+    assert case["secrets"]
+    for secret in case["secrets"]:
+        assert secret not in default_out
+        assert secret not in out, f"{secret!r} leaked in safe mode: {out!r}"
+
+
+@pytest.mark.parametrize("value", list(LEAK_CASES.values()), ids=list(LEAK_CASES))
+def test_round3_leak_cases_in_safe_mode(value):
+    vf = frozenset({"--env"})
+    for argv in (["tool", "--env", value], ["tool", value], ["tool", "--env=" + value]):
+        for show in (set(), {"--env"}):
+            out = safe(argv, show=show, vf=vf)
+            assert "hunter2" not in out
+            assert "aGh1bnRlcjI" not in out
+
+
+def test_naive_join_leaks_so_the_fixture_assertion_is_meaningful():
+    """Negative case: without redaction every fixture would leak."""
+    for case in CASES:
+        assert any(s in " ".join(case["argv"]) for s in case["secrets"]), case["name"]
+
+
+# ---- Property test over generated tokens ----
+
+SECRETS = [
+    "ghp_abcdefghijklmnopqrstuvwx",
+    "sk-abcdefghijklmnopqrstuvwx",
+    "AKIAIOSFODNN7EXAMPLE",
+    "eyJhbGciOiJIUzI1NiJ9.payload",
+    "xoxb-1234-abcdef",
+    "hunter2hunter2hunter2hunter2hunter2hunter2",
+    "password=hunter2",
+    "Bearer hunter2",
+    "user:pw@host",
+    "aGh1bnRlcjIxMjM0NTY3ODkwYWJjZA",
+]
+PIECES = ["--token=", "-p", "--", "-", "/", "./", "~/", "x", "a b", "_", "=", ":", "//", "@",
+          "", CAFE, ESC + "[0m", BEL, ZW, "$", "`", "'", '"', "key", "status", "run"]
+ALPHABET = "abcXYZ019_.+-/=:@ $`'\"~" + CAFE
+SAFE_CHARS = re.compile(r"^[A-Za-z0-9_.+<>=-]+$")
+SECRET_FLAG_NAME = re.compile(r"token|secret|pass|pwd|auth|bearer|cred|key|private|cookie", re.IGNORECASE)
+
+
+def _generated_tokens(count, seed):
+    rng = random.Random(seed)
+    for _ in range(count):
+        kind = rng.randrange(3)
+        if kind == 0:
+            yield "".join(rng.choice(ALPHABET) for _ in range(rng.randrange(1, 70)))
+        elif kind == 1:
+            yield "".join(rng.choice(PIECES) for _ in range(rng.randrange(1, 6)))
+        else:
+            parts = [rng.choice(PIECES) for _ in range(rng.randrange(0, 3))]
+            yield "".join(parts) + rng.choice(SECRETS) + rng.choice(PIECES)
+
+
+def test_property_safe_output_is_bounded_and_clean():
+    count = 0
+    for tok in _generated_tokens(4000, seed=68):
+        count += 1
+        for argv in (["tool", tok], ["tool", "--token", tok], ["python3", tok, tok]):
+            out = safe(argv)
+            for secret in SECRETS:
+                if secret in tok:
+                    assert secret not in out, (tok, out)
+            for shown in out.split(SP)[1:]:
+                assert shown in ("<arg>", "<redacted>", "<script>", "<env>", "...") or (
+                    SAFE_CHARS.match(shown) and len(shown) <= 60
+                ), (tok, out)
+            assert not any(ord(c) < 32 or ord(c) == 127 for c in out)
+    assert count == 4000
+
+
+def test_property_generator_produces_hostile_tokens():
+    """Negative case: the generator really emits secrets, so the property test can bite."""
+    toks = list(_generated_tokens(4000, seed=68))
+    assert sum(1 for t in toks if any(s in t for s in SECRETS)) > 500
+    assert any(ESC in t for t in toks)
+
+
+def test_property_token_after_flag_never_echoed():
+    rng = random.Random(681)
+    flags = ["--name", "--user", "-n", "-o", "--port", "--x", "-xvf", "--level", "-H", "--a-b"]
+    words = ["hunter2", "bob", "8080", "status", "x", "alpha-beta", "run", "tests"]
+    for _ in range(3000):
+        flag, word = rng.choice(flags), rng.choice(words) + str(rng.randrange(3))
+        argv = ["tool", "--pre", "pre0", flag, word, "end"]
+        out = safe(argv).split(SP)
+        assert word not in out and "pre0" not in out, out
+        assert out[-1] == "end"
+    # negative case: a flag in value_flags still shows its value
+    vf = frozenset({"--name"})
+    assert safe(["tool", "--name", "alpha"], show={"--name"}, vf=vf) == "tool --name alpha"
+
+
+def test_secret_named_flags_never_shown_by_name_property():
+    rng = random.Random(7)
+    names = ["token", "secret", "pass", "pwd", "auth", "bearer", "cred", "key", "private",
+             "cookie", "session", "phrase", "jwt", "signature", "p", "pw", "sid", "pin"]
+    for _ in range(500):
+        name = rng.choice(names)
+        flag = ("--" if rng.random() < 0.7 else "-") + name
+        out = safe(["tool", flag, "hunter2", "status"])
+        assert out == "tool <arg> <arg> status", out
+
+
+# ---- Bounds and timing ----
+
+
+def test_safe_mode_adversarial_token_scales_linearly():
+    def run(tok):
+        def go():
+            safe(["python3", tok, tok])
+            safe(["tool", "--flag", tok, tok])
+            safe(["tool", "--flag=" + tok])
+
+        return go
+
+    for shape in ADVERSARIAL:
+        _assert_scales_linearly(lambda n, shape=shape: run(shape(n)), 125_000)
+
+
+def test_one_megabyte_argv_returns_quickly_and_is_bounded():
+    argv = ["python3", *["z" * 255] * 4200]
+    assert sum(len(a) for a in argv) > 1_000_000
+    start = time.process_time()
+    out = safe(argv)
+    assert time.process_time() - start < 2.0
+    assert out.endswith(" ...")
+    assert len(out) < 400
+    one = safe(["tool", "x" * 1_000_000])
+    assert one == "tool <arg>"
+
+
+def test_token_count_cap_is_twelve_then_ellipsis():
+    out = safe(["tool", *["ok"] * 100])
+    assert out.split(SP) == ["tool", *["ok"] * 11, "..."]
+    assert safe(["tool", *["ok"] * 11]) == "tool " + SP.join(["ok"] * 11)

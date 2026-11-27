@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .redact import ARGS_MODES
 from .repospec import valid_repo
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
@@ -19,7 +20,7 @@ DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
-TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
+TOP_KEYS = {"snapshot_path", "show_args", "args_mode", "sources", "aliases"}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
 SECRET_WORDS = ("token", "password", "secret", "key")
 
@@ -59,6 +60,7 @@ class Config:
     aliases: dict[str, str]
     snapshot_path: Path
     show_args: set[str]
+    args_mode: str = "allowlist"
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
     _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
@@ -323,6 +325,10 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
 
+    args_mode = data.get("args_mode", "allowlist")
+    if not isinstance(args_mode, str) or args_mode not in ARGS_MODES:
+        raise ConfigError("'args_mode' must be \"allowlist\" or \"safe\"")
+
     snap = data.get("snapshot_path")
     if snap is None:
         snapshot_path = _default_snapshot_path()
@@ -336,6 +342,7 @@ def load_config(path: Path | None) -> Config:
         aliases=dict(aliases),
         snapshot_path=snapshot_path,
         show_args=set(show),
+        args_mode=args_mode,
         _alias_re=_compile_aliases(aliases),
         _alias_map=alias_map,
     )
