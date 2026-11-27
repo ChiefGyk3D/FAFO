@@ -48,16 +48,18 @@ runs), so CPU times are inflated compared with an idle host.
 
 | Phase | CPU percent of one core | RSS | Max snapshot gap | Notes |
 | --- | --- | --- | --- | --- |
-| idle | 0.8 to 1.0 (1.5 with a 1 s tick) | 17 to 18 MB | 2.2 s | within budget |
-| active | 7.0 to 7.5 (9.5 with a 1 s tick) | 21 MB | 2.2 s | over the 5 percent budget |
-| stress, 10 s, 4 loops | 0.8 to 1.1 | 18 MB | 2.2 to 2.4 s | hung source stale, no parse failures |
-| stress, 30 s, 8 loops | 0.9 | 18 MB | 2.2 s | hung source stale, no parse failures |
+| idle | 0.4 to 0.6 | 17 to 18 MB | 2.2 s | within budget |
+| active (after the scrub memo) | 3.5 to 4.5 | 21 MB | 2.6 s | within budget, thin margin on a loaded host |
+| active (memo disabled) | 7.5 | 21 MB | 2.2 s | over budget |
+| stress, 10 s, 4 loops | 0.3 to 0.6 | 17 MB | 2.3 s | hung source stale, no parse failures |
+| stress, 30 s, 8 loops | 0.9 (earlier run, before the memo) | 18 MB | 2.2 s | hung source stale, no parse failures |
 
-The active phase is the worst case the display caps allow (1792 changing process rows). Measured
-per call on this machine, redacting and sanitizing those rows costs about 0.14 s of CPU every
-2 s, and building and writing the snapshot and `views.json` about 0.06 s per tick. That is the
-cost behind the active figure; the active test asserts the 5 percent budget as written and
-fails here until the per-row cost is reduced or the budget is revisited.
+The active phase is the worst case the display caps allow (1792 changing process rows). Redacting
+and sanitizing those rows was the main cost (about 0.14 s of CPU per call). The collector now
+memoizes the string scrub per instance (bounded LRU of 8192 entries keyed by kind and the exact
+string, strings over 2000 characters bypass it), which cut the active figure from about 7.5 to
+about 4. The remaining cost is mostly the sanitizing in `build_views`, the dataclass walk and the
+JSON encoding of the snapshot.
 
 ## Revert proof
 

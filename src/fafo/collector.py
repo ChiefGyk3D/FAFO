@@ -11,6 +11,7 @@ import dataclasses
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,8 @@ _FIELD_MAX_LEN = 1000
 _MAX_DEPTH = 8
 _POLL_SLICE_S = 0.05
 _MIN_TICK_S = 0.05
+MEMO_MAX_ENTRIES = 8192
+MEMO_MAX_KEY_LEN = 2000  # longer strings bypass the memo
 
 _log = logging.getLogger("fafo.collector")
 
@@ -48,29 +51,89 @@ def backoff_delay(interval_s: float, failures: int) -> float:
     return max(interval_s, min(BACKOFF_CAP_S, grown))
 
 
-def _scrub(obj: Any, cfg: Config, depth: int = 0) -> Any:
+_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+
+
+def _init_field_names(cls: type) -> tuple[str, ...]:
+    """Field names of a dataclass type, cached (dataclasses.fields() is costly per row)."""
+    names = _FIELD_NAMES.get(cls)
+    if names is None:
+        names = tuple(f.name for f in dataclasses.fields(cls) if f.init)
+        _FIELD_NAMES[cls] = names
+    return names
+
+
+class _Memo:
+    """Bounded LRU of string scrub results, one per Collector (the alias map lives in cfg).
+
+    The key is (kind, the exact input string), never a hash, so a collision cannot return
+    another string's result. Values are immutable str. Strings over MEMO_MAX_KEY_LEN bypass it.
+    Called from the per-source worker threads, so every access holds the lock.
+    """
+
+    def __init__(self, cfg: Config) -> None:
+        self._cfg = cfg
+        self._lock = threading.Lock()
+        self._data: OrderedDict[tuple[str, str], str] = OrderedDict()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def _get(self, kind: str, s: str, compute: Callable[[str], str]) -> str:
+        if len(s) > MEMO_MAX_KEY_LEN:
+            return compute(s)
+        key = (kind, s)
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is not None:
+                self._data.move_to_end(key)
+                return hit
+        value = compute(s)
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > MEMO_MAX_ENTRIES:
+                self._data.popitem(last=False)
+        return value
+
+    def text(self, s: str) -> str:
+        return self._get("text", s, lambda x: self._cfg.alias(sanitize_text(x, _FIELD_MAX_LEN)))
+
+    def cmd(self, s: str) -> str:
+        if not isinstance(s, str):
+            return mask_credentials(s)  # returns "" for a non-str
+        return self._get("cmd", s, mask_credentials)
+
+
+def _scrub(obj: Any, cfg: Config, depth: int = 0, memo: _Memo | None = None) -> Any:
     """Sanitize every string (and dict key) in a row and apply host aliases. Fail closed."""
     if depth > _MAX_DEPTH:
         raise ValueError("row nesting too deep")
     if isinstance(obj, str):
+        if memo is not None:
+            return memo.text(obj)
         return cfg.alias(sanitize_text(obj, _FIELD_MAX_LEN))
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return dataclasses.replace(
-            obj,
-            **{f.name: _scrub(getattr(obj, f.name), cfg, depth + 1) for f in dataclasses.fields(obj)},
-        )
+        names = _init_field_names(type(obj))
+        changes = {n: _scrub(getattr(obj, n), cfg, depth + 1, memo) for n in names}
+        return dataclasses.replace(obj, **changes)
     if isinstance(obj, dict):
-        return {_scrub(str(k), cfg, depth + 1): _scrub(v, cfg, depth + 1) for k, v in obj.items()}
+        return {
+            _scrub(str(k), cfg, depth + 1, memo): _scrub(v, cfg, depth + 1, memo)
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
-        return [_scrub(v, cfg, depth + 1) for v in obj]
+        return [_scrub(v, cfg, depth + 1, memo) for v in obj]
     return obj
 
 
-def _scrub_result(res: SourceResult, cfg: Config) -> SourceResult:
+def _scrub_result(res: SourceResult, cfg: Config, memo: _Memo | None = None) -> SourceResult:
     # Mask before the per-field length cap: a secret straddling the cap must not leak a prefix.
     # Only Proc.cmd gets this; task, branch and worktree are plain labels and are not masked.
-    procs = [dataclasses.replace(p, cmd=mask_credentials(p.cmd)) for p in res.procs]
-    return _scrub(dataclasses.replace(res, procs=procs), cfg)
+    mask = memo.cmd if memo is not None else mask_credentials
+    procs = [dataclasses.replace(p, cmd=mask(p.cmd)) for p in res.procs]
+    return _scrub(dataclasses.replace(res, procs=procs), cfg, 0, memo)
 
 
 @dataclass
@@ -108,6 +171,7 @@ class Collector:
         self._write_views_file = write_views_file
         self.views_write_failures = 0
         self._clock = clock
+        self._memo = _Memo(cfg)
         self._stop = threading.Event()
         self._states: list[_State] = []
         for src in sources:
@@ -158,7 +222,7 @@ class Collector:
         if res.status is not None and res.status not in get_args(Status):
             return None, "invalid status from source", False
         try:
-            return _scrub_result(res, self._cfg), "", False
+            return _scrub_result(res, self._cfg, self._memo), "", False
         except Exception as exc:  # noqa: BLE001 - malformed rows count as a failed call
             return None, f"unusable rows: {type(exc).__name__}", False
 
