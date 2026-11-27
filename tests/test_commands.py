@@ -419,3 +419,87 @@ def test_unit_guard_bites():
 def test_systemd_readme_exists_without_em_dash():
     text = (ROOT / "examples" / "systemd" / "README.md").read_text(encoding="utf-8")
     assert EM not in text and "daemon-reload" in text
+
+
+# ---- strict JSON from the command ----------------------------------------------------------
+
+
+def test_json_command_prints_strict_json_for_nonfinite_values(snap_path, monkeypatch, capfdbinary):
+    snap = snap_with(sess(100, SID_A, "src-1"))
+    snap.host["load1"] = float("nan")
+    monkeypatch.setattr(commands, "read_snapshot", lambda p: snap)
+
+    def refuse(name):
+        raise AssertionError(name)
+
+    code, out, _, _ = run(capfdbinary, "json", "--snapshot", str(snap_path))
+    assert code == 0
+    assert json.loads(out, parse_constant=refuse)["host"]["load1"] is None
+
+
+def test_json_command_with_nan_in_file_is_no_collector(tmp_path, capfdbinary):
+    p = tmp_path / "s.json"
+    write_snapshot(p, snap_with(sess(100, SID_A, "src-1")))
+    p.write_text(p.read_text(encoding="utf-8").replace('"load1":1.5', '"load1":NaN'),
+                 encoding="utf-8")
+    code, out, _, _ = run(capfdbinary, "json", "--snapshot", str(p))
+    assert code == 0 and json.loads(out) == {"status": "no-collector"}
+
+
+# ---- README shell blocks -------------------------------------------------------------------
+
+FENCE = re.compile(r"^```(?:sh|bash|shell|console)?\s*$")
+README = ROOT / "README.md"
+
+
+def readme_command_problems(text: str) -> list[str]:
+    """Rule: in README shell blocks, a line starting with `fafo ` (a bare command) needs an
+    earlier `pipx install` or `activate` line in a shell block. Commands invoked by full path
+    (a path ending in /fafo) never start with `fafo ` and are always fine.
+    """
+    problems: list[str] = []
+    in_block = False
+    ready = False
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.startswith("```"):
+            if in_block:
+                in_block = False
+            elif FENCE.match(line):
+                in_block = True
+            continue
+        if not in_block:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("pipx install") or "pipx install " in stripped \
+                or re.search(r"(?:^|\s)(?:source|\.)\s+\S*activate\b", stripped):
+            ready = True
+        elif re.match(r"fafo(\s|$)", stripped) and not ready:
+            problems.append(f"README.md:{n}: {stripped}")
+    return problems
+
+
+def test_readme_bare_fafo_commands_follow_an_install_line():
+    text = README.read_text(encoding="utf-8")
+    assert len(re.findall(r"^fafo ", text, re.MULTILINE)) >= 5  # the quickstart commands were found
+    assert readme_command_problems(text) == []
+    assert EM not in text
+
+
+def test_readme_rule_bites():
+    bad = "```\nfafo doctor\n```\n"
+    assert readme_command_problems(bad) == ["README.md:2: fafo doctor"]
+    wrong_install = "```\npip install .\nfafo doctor\n```\n"
+    assert readme_command_problems(wrong_install)  # a bare pip install is not on PATH
+    ok = "```\npipx install .\nfafo doctor\n```\n"
+    assert readme_command_problems(ok) == []
+    activated = "```\nsource ~/v/bin/activate\nfafo doctor\n```\n"
+    assert readme_command_problems(activated) == []
+    full = "```\n~/.local/share/fafo-venv/bin/fafo doctor\n```\n"
+    assert readme_command_problems(full) == []
+    # an install line in prose or in a non-shell block does not count
+    assert readme_command_problems("pipx install .\n```\nfafo doctor\n```\n")
+
+
+def test_unit_default_matches_readme_and_both_paths_documented():
+    text = (ROOT / "examples" / "systemd" / "README.md").read_text(encoding="utf-8")
+    assert "~/.local/bin/fafo" in text and "fafo-venv/bin/fafo" in text

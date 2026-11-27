@@ -95,9 +95,32 @@ def _str(v):
         raise TypeError("expected str")
 
 
+MAX_DEPTH = 32
+
+
+def _finite_tree(v, depth: int = 0):
+    """Free-form values (host, quota, gpu): no non-finite float anywhere, bounded nesting."""
+    if depth > MAX_DEPTH:
+        raise ValueError("too deeply nested")
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            raise ValueError("non-finite number")
+    elif isinstance(v, dict):
+        for item in v.values():
+            _finite_tree(item, depth + 1)
+    elif isinstance(v, list):
+        for item in v:
+            _finite_tree(item, depth + 1)
+
+
 def _dict(v):
     if type(v) is not dict:
         raise TypeError("expected dict")
+    _finite_tree(v)
+
+
+def _refuse_constant(name):
+    raise ValueError("non-standard JSON constant")
 
 
 def _status(v):
@@ -203,7 +226,7 @@ def _snapshot(doc) -> Snapshot:
 def read_snapshot(path: Path) -> Snapshot | None:
     """Return the snapshot, or None if missing, truncated, invalid or an unknown version."""
     try:
-        doc = json.loads(Path(path).read_bytes())
+        doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
         return _snapshot(doc)
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None

@@ -289,3 +289,41 @@ def test_session_unknown_extra_field_still_rejected(tmp_path: Path):
     doc["sessions"][0]["peerToken"] = "x"
     path.write_text(json.dumps(doc))
     assert read_snapshot(path) is None
+
+
+# ---- non-finite numbers anywhere in the document are rejected -------------------------------
+
+NONFINITE = ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"]
+LOCATIONS = [
+    ('"load":4.1', '"load":{v}'),  # host
+    ('"5h":0.41', '"5h":{v}'),  # quota, nested
+    ('"util":78', '"util":{v}'),  # llm.gpu
+]
+
+
+def _tampered(tmp_path: Path, old: str, new: str) -> Path:
+    path = tmp_path / "snap.json"
+    write_snapshot(path, make_snapshot())
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1  # the fixture really contains the value being replaced
+    path.write_text(text.replace(old, new), encoding="utf-8")
+    return path
+
+
+def test_untampered_fixture_still_reads(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    write_snapshot(path, make_snapshot())
+    assert read_snapshot(path) is not None
+
+
+def test_nonfinite_numbers_rejected_everywhere(tmp_path: Path):
+    for old, template in LOCATIONS:
+        for value in NONFINITE:
+            path = _tampered(tmp_path, old, template.format(v=value))
+            assert read_snapshot(path) is None, (old, value)
+
+
+def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
+    nest = "[" * 5000 + "1.5" + "]" * 5000
+    path = _tampered(tmp_path, '"load":4.1', f'"load":{nest}')
+    assert read_snapshot(path) is None

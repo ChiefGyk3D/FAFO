@@ -12,18 +12,28 @@ anything.
 
 ## Quickstart
 
-Install from a checkout (Python 3.11 or newer):
+Install from a clone of the repository (Python 3.11 or newer). The preferred way is pipx,
+which puts the `fafo` command in `~/.local/bin` (run `pipx ensurepath` once if that directory
+is not on your PATH):
 
 ```
 git clone <this repository> && cd FAFO
+pipx install .
+fafo doctor     # run every enabled source once and report ok, absent, down or stale
+```
+
+Alternative without pipx: a virtual environment. Its commands are not on your PATH, so call
+them by full path (or run `source ~/.local/share/fafo-venv/bin/activate` first):
+
+```
 python3 -m venv ~/.local/share/fafo-venv
 ~/.local/share/fafo-venv/bin/pip install .
+~/.local/share/fafo-venv/bin/fafo doctor
 ```
 
-Then, from the same environment:
+The commands below are written for the pipx install; with a venv, put the full path in front.
 
 ```
-fafo doctor     # run every enabled source once and report ok, absent, down or stale
 fafo run        # the collector: polls the sources and writes the snapshot until Ctrl-C
 fafo table      # print the table once (plain text, no color, fits the terminal)
 fafo sessions   # one line per Claude session: name, session id, project
@@ -38,7 +48,8 @@ Every render command takes `--snapshot PATH` and `--config PATH`. The snapshot p
 running they show "collector not running" and exit 0; `fafo json` prints
 `{"status": "no-collector"}`.
 
-To keep the collector running, see `examples/systemd/` for a systemd user unit.
+To keep the collector running, see `examples/systemd/` for a systemd user unit (its `ExecStart=`
+must point at your install: `~/.local/bin/fafo` for pipx, the venv `bin` otherwise).
 
 ### You are here
 

@@ -16,8 +16,9 @@ Description=FAFO collector (read-only observer of AI agents)
 
 [Service]
 Type=simple
-# %h is the home directory of the user running the unit. Adjust if fafo is installed elsewhere
-# (for example with pipx, the path is usually the same: ~/.local/bin/fafo).
+# %h is the home directory of the user running the unit. This path is where `pipx install`
+# puts the command. For a venv install use, for example,
+# %h/.local/share/fafo-venv/bin/fafo run (see README.md in this directory).
 ExecStart=%h/.local/bin/fafo run
 
 # Restart only after a failure, not after a clean stop, and wait a few seconds so a crash loop

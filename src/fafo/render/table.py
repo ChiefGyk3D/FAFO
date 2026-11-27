@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 
 from ..model import Snapshot
@@ -226,15 +227,38 @@ def format_table(views: Views, width: int = 100) -> str:
     return "\n".join(clip(line, width) for line in lines) + "\n"
 
 
+MAX_JSON_DEPTH = 64
+
+
+def scrub_nonfinite(value, depth: int = 0):
+    """Copy of value with every NaN or infinity replaced by None (strict JSON has neither).
+
+    Containers nested deeper than MAX_JSON_DEPTH become None rather than raising.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if depth >= MAX_JSON_DEPTH and isinstance(value, (dict, list, tuple)):
+        return None
+    if isinstance(value, dict):
+        return {k: scrub_nonfinite(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub_nonfinite(v, depth + 1) for v in value]
+    return value
+
+
+def _dump(doc) -> str:
+    return json.dumps(scrub_nonfinite(doc), indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
 def format_json(snap: Snapshot | None, now: float) -> str:
     """Snapshot as JSON (sorted keys, indent 2) with status and age added at the top level."""
     status, age = snapshot_status(snap, now)
     if snap is None:
-        return json.dumps({"status": status}, indent=2, sort_keys=True) + "\n"
+        return _dump({"status": status})
     doc = asdict(snap)
     doc["status"] = status
     doc["age_s"] = age
-    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+    return _dump(doc)
 
 
 def format_sessions(views: Views) -> str:

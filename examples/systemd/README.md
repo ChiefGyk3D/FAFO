@@ -13,8 +13,12 @@ Then `fafo table` shows what the collector sees. Logs: `journalctl --user -u faf
 
 Notes:
 
-- The unit expects the `fafo` command at `~/.local/bin/fafo`. Edit `ExecStart=` if it is
-  elsewhere.
+- Where `fafo` lives depends on how you installed it. `pipx install .` puts it at
+  `~/.local/bin/fafo`, which is what the unit uses by default (`%h/.local/bin/fafo`). A venv
+  install, for example `~/.local/share/fafo-venv`, puts it at `~/.local/share/fafo-venv/bin/fafo`;
+  then change the line to `ExecStart=%h/.local/share/fafo-venv/bin/fafo run` (`%h` is your home
+  directory) before copying the unit, and run `systemctl --user daemon-reload` again after any
+  edit. Check the path with `systemctl --user status fafo`: a wrong path shows status 203/EXEC.
 - The snapshot is written to `$XDG_RUNTIME_DIR/fafo/snapshot.json`, which matches the default
   of `fafo table`, `fafo tui` and the others.
 - The unit holds no secrets. A source that needs a token reads it from an environment variable
