@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import stat
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 from typing import get_args
 
-from .jsonsafe import check_finite
+from .jsonsafe import MAX_INT_BITS, check_finite, plain_copy
 from .model import (
     SNAPSHOT_VERSION,
     Inflight,
@@ -26,6 +27,8 @@ from .model import (
     Stamped,
     Status,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _ensure_dir(directory: Path) -> None:
@@ -57,7 +60,12 @@ def write_snapshot(
     """
     path = Path(path)
     ensure_private_dir(path.parent)
-    payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
+    # Iterative, capped walk: NaN, infinities and over-deep or over-large values become null, so
+    # the file is strict JSON that read_snapshot accepts. Log the count only, never the values.
+    plain, replaced = plain_copy(snap)
+    if replaced:
+        _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
+    payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -77,7 +85,7 @@ def write_snapshot(
 
 
 def _int(v):
-    if type(v) is not int or v < 0:
+    if type(v) is not int or v < 0 or v.bit_length() > MAX_INT_BITS:
         raise TypeError("expected non-negative int")
 
 
@@ -87,6 +95,8 @@ def _opt_int(v):
 
 
 def _float(v):
+    if type(v) is int and v.bit_length() > MAX_INT_BITS:
+        raise TypeError("expected finite number")  # before math.isfinite: it overflows on big ints
     if type(v) not in (int, float) or not math.isfinite(v):
         raise TypeError("expected finite number")
 
@@ -211,5 +221,9 @@ def read_snapshot(path: Path) -> Snapshot | None:
     try:
         doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
         return _snapshot(doc)
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+    except (
+        OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
+        ArithmeticError, RecursionError,
+    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
+        _log.debug("snapshot unreadable: %s", type(exc).__name__)
         return None
