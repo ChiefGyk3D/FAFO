@@ -25,7 +25,6 @@ MAX_ROWS = 128
 MAX_TABLE = 50000  # processes examined per pass
 MAX_DEPTH = 64  # ancestor hops
 VALUE_FLAGS = frozenset({"--model", "--resume"})
-_RUNNERS = frozenset({"node", "nodejs", "bun"})
 _CODEX_HOSTS = frozenset({"codex-code-mode-host"})
 
 Lister = Callable[[], Iterable[Any]]
@@ -44,19 +43,135 @@ def _base(token: str) -> str:
     return token.rsplit("/", 1)[-1]
 
 
+# Interpreter command lines. Anything not understood is NOT a match (fail closed).
+_NODE = frozenset({"node", "nodejs"})
+_NODE_VALUE_OPTS = frozenset(
+    {
+        "-r", "--require", "--import", "--loader", "--experimental-loader", "--input-type",
+        "-C", "--conditions", "--title", "--env-file", "--inspect-port", "--disable-warning",
+        "--watch-path", "--diagnostic-dir", "--report-dir", "--cpu-prof-dir", "--heap-prof-dir",
+    }
+)
+_NODE_NO_SCRIPT = frozenset(
+    {"-e", "--eval", "-p", "--print", "-pe", "-c", "--check", "-i", "--interactive", "-"}
+)
+_NODE_BOOL_OPTS = frozenset(
+    {
+        "--enable-source-maps", "--no-warnings", "--no-deprecation", "--expose-gc",
+        "--preserve-symlinks", "--trace-warnings", "--trace-deprecation", "--throw-deprecation",
+        "--abort-on-uncaught-exception", "--use-strict", "--pending-deprecation",
+        "--experimental-vm-modules", "--experimental-strip-types", "--watch",
+    }
+)
+_BUN_VALUE_OPTS = frozenset(
+    {
+        "--cwd", "-c", "--config", "--env-file", "-r", "--preload", "--import", "-d", "--define",
+        "--port", "--tsconfig-override", "--install", "--elide-lines", "-F", "--filter",
+        "--shell", "--loader", "--main-fields", "--conditions",
+    }
+)
+_BUN_BOOL_OPTS = frozenset(
+    {
+        "--bun", "--watch", "--hot", "--silent", "--smol", "--no-install", "--if-present",
+        "--prefer-offline", "--prefer-latest", "--no-addons", "--no-clear-screen", "--verbose",
+    }
+)
+_BUN_SUBCOMMANDS = frozenset(
+    {
+        "install", "i", "add", "a", "remove", "rm", "update", "test", "build", "create", "init",
+        "link", "unlink", "pm", "upgrade", "repl", "outdated", "audit", "publish", "patch",
+    }
+)
+
+
+def _node_script(args: list[str]) -> str | None:
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if tok in _NODE_NO_SCRIPT or tok.split("=", 1)[0] in _NODE_NO_SCRIPT:
+            return None
+        if not tok.startswith("-"):
+            return tok
+        name, eq, _ = tok.partition("=")
+        if eq:
+            if not name.startswith("-"):
+                return None
+            i += 1  # --opt=value
+        elif tok in _NODE_VALUE_OPTS:
+            i += 2
+        elif tok in _NODE_BOOL_OPTS:
+            i += 1
+        else:
+            return None  # unknown option: arity unknown, fail closed
+    return None
+
+
+def _bun_opts(args: list[str]) -> list[str] | None:
+    """Drop leading options; return the rest, or None if an option is not understood."""
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--":
+            return args[i + 1 :]
+        if not tok.startswith("-"):
+            return args[i:]
+        if "=" in tok:
+            i += 1
+        elif tok in _BUN_VALUE_OPTS:
+            i += 2
+        elif tok in _BUN_BOOL_OPTS:
+            i += 1
+        else:
+            return None
+    return []
+
+
+def _bun_script(args: list[str], bunx: bool) -> str | None:
+    """Script path or package token that would run, or None. Bare names never count as files."""
+    rest = _bun_opts(args)
+    if not rest:
+        return None
+    first = rest[0]
+    if bunx or first in ("x", "bunx"):
+        pkg_args = rest if bunx else _bun_opts(rest[1:])
+        if not pkg_args:
+            return None
+        pkg = pkg_args[0]
+        return pkg.rsplit("@", 1)[0] if "@" in pkg[1:] else pkg  # drop a version suffix
+    if first == "run":
+        rest = _bun_opts(rest[1:])
+        if not rest:
+            return None
+        first = rest[0]
+    elif first in _BUN_SUBCOMMANDS:
+        return None
+    return first if "/" in first else None  # a bare word is a package script, not a file
+
+
+def _script_matches(script: str, name: str) -> bool:
+    base = _base(script)
+    return base == name or base in (name + ".js", name + ".mjs", name + ".cjs")
+
+
 def runs_cli(argv: tuple[str, ...] | list[str], name: str) -> bool:
     """True if argv is the executable `name`, or node/bun running a script named `name`."""
-    if not argv or not isinstance(argv[0], str):
+    if not argv or not all(isinstance(a, str) for a in argv):
         return False
     exe = _base(argv[0])
-    if exe == name:
-        return True
-    if exe in _RUNNERS:
-        for tok in argv[1:]:
-            if not isinstance(tok, str) or tok.startswith("-"):
-                continue
-            return _base(tok) == name
-    return False
+    args = list(argv[1:])
+    if exe in _NODE:
+        script = _node_script(args)
+        if script is not None and "/" not in script:
+            script = None  # a bare word is ambiguous (relative name, option value): fail closed
+    elif exe == "bun":
+        script = _bun_script(args, bunx=False)
+    elif exe == "bunx":
+        script = _bun_script(args, bunx=True)
+    else:
+        return exe == name
+    return script is not None and _script_matches(script, name)
 
 
 def is_claude(argv: tuple[str, ...]) -> bool:

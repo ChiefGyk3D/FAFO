@@ -5,7 +5,7 @@ import pytest
 
 from fafo.config import SourceCfg
 from fafo.source import Ctx
-from fafo.sources.codex import MAX_ROWS, CodexSource
+from fafo.sources.codex import MAX_ROWS, CodexSource, runs_cli
 
 SHOW = {"exec", "resume", "--resume", "--model"}
 
@@ -191,3 +191,77 @@ def test_empty_table_is_ok_not_absent():
 
 def test_source_name():
     assert CodexSource(lister=list, show_args=set()).name == "codex"
+
+
+# ---- interpreter command-line parsing (node, nodejs, bun) ----
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["node", "--eval", "codex"],
+        ["node", "--", "codex"],
+        ["node", "-e", "codex"],
+        ["node", "--eval=codex"],
+        ["node", "-p", "codex"],
+        ["node", "--print", "codex"],
+        ["node", "-pe", "codex"],
+        ["node", "--check", "/x/codex"],
+        ["node", "--require", "/tmp/x", "codex"],
+        ["node", "-r", "/tmp/x", "codex"],
+        ["node", "--import", "/tmp/x", "codex"],
+        ["node", "--loader", "l", "codex"],
+        ["node", "--title", "t", "codex"],
+        ["node", "--env-file", "e", "codex"],
+        ["node", "--input-type", "module", "codex"],
+        ["node", "-C", "dev", "codex"],
+        ["node", "--interactive", "codex"],
+        ["node", "--unknown-opt", "codex"],
+        ["node", "-", "codex"],
+        ["node"],
+        ["node", "/x/other", "codex"],
+        ["bun", "run", "other", "codex"],
+        ["bun", "run", "/x/other", "/x/codex"],
+        ["bun", "run", "codex"],
+        ["bun", "install", "/x/codex"],
+        ["bun", "--cwd", "/x/codex", "/x/other"],
+        ["bun", "x", "other", "codex"],
+        ["bunx", "other", "codex"],
+        ["bunx", "@scope/codex-cli"],
+        ["bun"],
+    ],
+)
+def test_interpreter_misclassification_rejected(argv):
+    assert runs_cli(argv, "codex") is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js", "exec"],
+        ["node", "/usr/lib/node_modules/@openai/codex/bin/codex", "exec"],
+        ["nodejs", "/x/bin/codex"],
+        ["node", "--max-old-space-size=4096", "/x/bin/codex"],
+        ["node", "--enable-source-maps", "--no-warnings", "/x/bin/codex"],
+        ["node", "--require", "/tmp/x", "/x/bin/codex"],
+        ["node", "--", "/x/bin/codex"],
+        ["bun", "run", "/x/codex"],
+        ["bun", "run", "--bun", "/x/codex"],
+        ["bun", "/x/bin/codex"],
+        ["bun", "--cwd", "/y", "/x/codex"],
+        ["bun", "x", "codex"],
+        ["bunx", "codex"],
+        ["bunx", "--bun", "codex@1.2.3"],
+        ["/usr/bin/codex"],
+    ],
+)
+def test_interpreter_positive_shapes(argv):
+    assert runs_cli(argv, "codex") is True
+
+
+def test_interpreter_gemini_shapes():
+    assert runs_cli(["node", "--max-old-space-size=4096", "/x/bin/gemini"], "gemini")
+    assert runs_cli(["bun", "run", "/x/gemini"], "gemini")
+    assert not runs_cli(["node", "--eval", "gemini"], "gemini")
+    assert not runs_cli(["node", "--require", "/tmp/x", "gemini"], "gemini")
+    assert not runs_cli(["bun", "run", "other", "gemini"], "gemini")
