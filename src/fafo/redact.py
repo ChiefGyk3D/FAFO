@@ -204,12 +204,16 @@ def mask_credentials(text: str) -> str:
         return ""
     words = _strip(text[: MAX_REDACTED_LEN * 4]).split()
     out: list[str] = []
-    prev_auth = False
+    mask_next = False
     for raw in words[: MAX_TOKENS * 16]:
         word = _normalize(raw)
-        if prev_auth or len(word) > MAX_TOKEN_LEN or _is_credential(word):
+        is_flag = word.startswith("-")
+        if (mask_next and not is_flag) or len(word) > MAX_TOKEN_LEN or _is_credential(word):
             out.append(MASK)
         else:
             out.append(word)
-        prev_auth = word.lower().rstrip(":") in ("bearer", "basic", "authorization")
+        # The word after a secret-named flag ("--token x", "-p x") or a header scheme is a value.
+        mask_next = word.lower().rstrip(":") in ("bearer", "basic", "authorization") or (
+            is_flag and "=" not in word and _secret_name(word.lstrip("-"))
+        )
     return " ".join(out)

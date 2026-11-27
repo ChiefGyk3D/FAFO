@@ -278,6 +278,25 @@ def test_rows_are_scrubbed_and_aliased_at_the_collector(tmp_path):
     assert snap.procs[0].cmd.startswith("tool") and "<redacted>" in snap.procs[0].cmd
 
 
+def test_secret_straddling_the_cap_is_masked_before_truncation(tmp_path):
+    secret = "A1b2C" + "d3E4f5G6h7" * 3 + "iJ8k9L0m1"  # 44 chars
+    assert len(secret) == 44
+    cmd = "a " * 497 + secret  # secret starts at char 994, straddling the 1000 cap
+    assert len(cmd) > 1000 and cmd.index(secret) < 1000
+
+    class Long:
+        name = "long"
+
+        def collect(self, ctx):
+            return SourceResult(procs=[Proc(2, 1, None, "x", cmd, 0.0, 1, 1.0)])
+
+    cfg = make_cfg(tmp_path, long=fast())
+    col = Collector(cfg, [Long()], cfg.snapshot_path)
+    col._poll(col._states[0])
+    out = col.snapshot().procs[0].cmd
+    assert "A1b2C" not in out and out.endswith("<redac")
+
+
 def test_error_text_strips_unicode_separators_and_bidi(tmp_path):
     msg = "a" + chr(0x2028) + "b" + chr(0x200B) + "c" + chr(0x202E) + "d\r\ne"
 

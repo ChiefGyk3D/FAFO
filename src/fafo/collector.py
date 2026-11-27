@@ -65,10 +65,10 @@ def _scrub(obj: Any, cfg: Config, depth: int = 0) -> Any:
 
 
 def _scrub_result(res: SourceResult, cfg: Config) -> SourceResult:
-    out = _scrub(res, cfg)
-    for p in out.procs:
-        p.cmd = mask_credentials(p.cmd)
-    return out
+    # Mask before the per-field length cap: a secret straddling the cap must not leak a prefix.
+    # Only Proc.cmd gets this; task, branch and worktree are plain labels and are not masked.
+    procs = [dataclasses.replace(p, cmd=mask_credentials(p.cmd)) for p in res.procs]
+    return _scrub(dataclasses.replace(res, procs=procs), cfg)
 
 
 @dataclass
