@@ -410,16 +410,15 @@ def test_views_failure_never_stops_snapshot(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(mod, "build_views", boom)
     cfg = make_cfg(tmp_path, counter=fast())
     col = Collector(cfg, [Counter()], cfg.snapshot_path)
-    with caplog.at_level(logging.WARNING, logger="fafo.collector"):
-        with Running(col):
-            taken = set()
-            end = time.monotonic() + 3
-            while len(taken) < 3 and time.monotonic() < end:
-                r = read_snapshot(cfg.snapshot_path)
-                if r:
-                    taken.add(r.taken)
-                time.sleep(0.03)
-            assert len(taken) >= 3
+    with caplog.at_level(logging.WARNING, logger="fafo.collector"), Running(col):
+        taken = set()
+        end = time.monotonic() + 3
+        while len(taken) < 3 and time.monotonic() < end:
+            r = read_snapshot(cfg.snapshot_path)
+            if r:
+                taken.add(r.taken)
+            time.sleep(0.03)
+        assert len(taken) >= 3
     assert not cfg.snapshot_path.with_name("views.json").exists()
     assert "views" in caplog.text
     assert "secret-value-xyz" not in caplog.text
@@ -435,7 +434,14 @@ def test_views_write_failure_never_stops_snapshot(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path, counter=fast())
     col = Collector(cfg, [Counter()], cfg.snapshot_path)
     with Running(col):
-        wait_for(lambda: read_snapshot(cfg.snapshot_path))
+        taken = set()
+        end = time.monotonic() + 3
+        while len(taken) < 3 and time.monotonic() < end:
+            r = read_snapshot(cfg.snapshot_path)
+            if r:
+                taken.add(r.taken)
+            time.sleep(0.03)
+        assert len(taken) >= 3
 
 
 def test_views_file_opt_out(tmp_path):

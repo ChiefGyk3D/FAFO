@@ -19,9 +19,9 @@ from typing import Any, get_args
 from .config import Config, SourceCfg
 from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
 from .redact import mask_credentials, sanitize_text
-from .source import Ctx, Source, SourceResult
 from .render.export import write_views
 from .render.view import build_views
+from .source import Ctx, Source, SourceResult
 from .store import write_snapshot
 
 BACKOFF_CAP_S = 60.0

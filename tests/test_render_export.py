@@ -6,9 +6,8 @@ import json
 import os
 import stat
 import threading
-from pathlib import Path
 
-from fafo.model import Proc, Session, Snapshot, Stamped, SNAPSHOT_VERSION
+from fafo.model import SNAPSHOT_VERSION, Proc, Session, Snapshot, Stamped
 from fafo.render import export
 from fafo.render.export import views_to_dict, write_views
 from fafo.render.view import build_views
