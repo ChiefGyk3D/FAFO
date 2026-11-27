@@ -5,7 +5,8 @@ no machine-readable per-session source. `safo agents-status` is human text with 
 reads the board over the network; `safo usage --json` and `safo local report --json` carry
 usage, not issue or card data. So this adapter reads a documented JSON shape from a
 configured command, and reports `absent` when the command is missing or its output does not
-match. Shape (see tests/fixtures/safo_agents_status.json):
+match, strictly and all or nothing (exact top-level key, at most 1000 rows, every row an
+object with only the five keys, unique non-empty session ids, string or null values). Shape (see tests/fixtures/safo_agents_status.json):
 
     {"sessions": [{"session_id": "s1", "issue": "owner/repo#12", "card_status": "In progress",
                    "epic": "Epic name", "effort": "M"}]}
@@ -33,6 +34,8 @@ from fafo.adapters.base import Enrichment, clean
 
 MAX_OUTPUT = 256 * 1024
 MAX_DEPTH = 8
+MAX_ROWS = 1000
+_SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _ISSUE_LINE = re.compile(r"issue: ([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})#([0-9]{1,7})")
 _DEFAULT_FIELDS = {
     "session_id": "session_id",
@@ -137,7 +140,7 @@ class SafoAdapter:
                 env[key] = os.environ[key]
         return env
 
-    def _fetch(self) -> list[object] | None:
+    def _fetch(self) -> list[dict[str, object]] | None:
         try:
             raw = self._runner(self.command, self.timeout_s, self._env())
         except (subprocess.TimeoutExpired, TimeoutError):
@@ -154,11 +157,33 @@ class SafoAdapter:
         except (ValueError, RecursionError):
             self.health = "absent"
             return None
-        rows = data.get("sessions") if isinstance(data, dict) else None
-        if not isinstance(rows, list) or not _depth_ok(data):
+        rows = self._validate(data)
+        if rows is None:
             self.health = "absent"
             return None
         self.health = "ok"
+        return rows
+
+    def _validate(self, data: object) -> list[dict[str, object]] | None:
+        """All-or-nothing: any violation of the documented shape rejects the whole output."""
+        if not isinstance(data, dict) or set(data) != {"sessions"} or not _depth_ok(data):
+            return None
+        rows = data["sessions"]
+        if not isinstance(rows, list) or len(rows) > MAX_ROWS:
+            return None
+        id_key = self.fields["session_id"]
+        allowed = {self.fields[k] for k in _DEFAULT_FIELDS}
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or not set(row) <= allowed:
+                return None
+            sid = row.get(id_key)
+            if not isinstance(sid, str) or not _SESSION_ID.fullmatch(sid) or sid in seen:
+                return None
+            seen.add(sid)
+            if any(k != id_key and v is not None and not isinstance(v, str)
+                   for k, v in row.items()):
+                return None
         return rows
 
     def enrich(
@@ -170,10 +195,8 @@ class SafoAdapter:
         wanted = set(session_ids)
         out: dict[str, Enrichment] = {}
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            sid = row.get(self.fields["session_id"])
-            if not isinstance(sid, str) or sid not in wanted or sid in out:
+            sid = row[self.fields["session_id"]]
+            if sid not in wanted:
                 continue
             vals = {k: clean(row.get(self.fields[k])) for k in _VALUE_KEYS}
             if vals["issue"] is None:

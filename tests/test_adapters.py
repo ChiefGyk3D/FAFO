@@ -135,3 +135,54 @@ def test_same_class_works_as_shit_port():
     a = SafoAdapter(["shit", "status", "--json"], field_names=names, runner=fake(raw), name="shit")
     assert a.name == "shit"
     assert a.enrich(["w9"], {})["w9"] == Enrichment("o/r#5", "Doing", "G", "XL")
+
+
+def _rows(*rows, **top):
+    return json.dumps({"sessions": list(rows), **top}).encode()
+
+
+_OK = {"session_id": "s1", "issue": "o/r#1"}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _rows(_OK, "not an object"),
+        _rows(_OK, 5),
+        _rows({"session_id": "s1", "epic": 5}),
+        _rows({"session_id": "s1", "effort": ["M"]}),
+        _rows({"session_id": "s1", "extra": "x"}),
+        _rows({"issue": "o/r#1"}),
+        _rows({"session_id": ""}),
+        _rows({"session_id": None}),
+        _rows({"session_id": 7}),
+        _rows({"session_id": "bad id;rm"}),
+        _rows({"session_id": "a" * 129}),
+        _rows(_OK, {"session_id": "s1", "epic": "dup"}),
+        _rows(*[{"session_id": f"s{i}"} for i in range(1001)]),
+        b'[{"session_id": "s1"}]',
+        b'"text"',
+        _rows(_OK, extra_top=1),
+        b'{"other": []}',
+    ],
+)
+def test_strict_shape_all_or_nothing(raw):
+    a = SafoAdapter(["safo"], runner=fake(raw))
+    assert a.enrich(["s1", "s2"], {}) == {}
+    assert a.health == "absent"
+
+
+def test_strict_shape_accepts_nulls_and_limit():
+    rows = [{"session_id": f"s{i}", "issue": None, "epic": None} for i in range(1000)]
+    a = SafoAdapter(["safo"], runner=fake(_rows(*rows)))
+    assert set(a.enrich(["s0", "s999"], {})) == {"s0", "s999"}
+    assert a.health == "ok"
+
+
+def test_strict_shape_uses_configured_field_names():
+    names = {"session_id": "sid", "issue": "ticket"}
+    good = json.dumps({"sessions": [{"sid": "w1", "ticket": "o/r#2"}]}).encode()
+    bad = json.dumps({"sessions": [{"sid": "w1", "issue": "o/r#2"}]}).encode()
+    assert SafoAdapter(["x"], field_names=names, runner=fake(good)).enrich(["w1"], {})
+    a = SafoAdapter(["x"], field_names=names, runner=fake(bad))
+    assert a.enrich(["w1"], {}) == {} and a.health == "absent"
