@@ -104,6 +104,9 @@ class FakePsutil:
         for p in procs:
             p.table = self.table
 
+    def process_iter(self):
+        return iter(list(self.table.values()))
+
     def Process(self, pid):
         if pid not in self.table:
             raise FakeErr("gone")
@@ -458,3 +461,107 @@ def test_proc_reader_parses_comm_with_parens_and_spaces(tmp_path):
     assert claude.parse_start_ticks(stat) == "987654"
     assert claude.parse_start_ticks("garbage") is None
     assert claude.parse_start_ticks("1 (a) S 1 2") is None
+
+
+def test_huge_started_at_is_skipped_and_others_survive(tmp_path):
+    d = make_dir(tmp_path)
+    doc = json.loads((d / "4001.json").read_text())
+    doc["startedAt"] = 10**4000
+    (d / "4001.json").write_text(json.dumps(doc))
+    doc["startedAt"] = 1e400  # parses to infinity
+    (d / "4002.json").write_text(json.dumps(doc).replace("Infinity", "1e400"))
+    res = source(d, LIVE).collect(ctx())
+    assert sorted(by_pid(res)) == [4000]
+
+
+def test_started_at_bounds(tmp_path):
+    d = make_dir(tmp_path, ("4000",))
+    for bad in (-1, True, 4_000_000_000_001, "1700000000000", None):
+        doc = json.loads((d / "4000.json").read_text())
+        doc["startedAt"] = bad
+        (d / "4000.json").write_text(json.dumps(doc))
+        assert source(d, {4000: "111000"}).collect(ctx()).sessions == []
+
+
+def test_an_entry_that_raises_never_kills_the_source(tmp_path):
+    class Exploding(StubProcs):
+        def start_ticks(self, pid):
+            if pid == 4001:
+                raise RuntimeError("reader blew up")
+            return super().start_ticks(pid)
+
+    procs = [FakeProc(p) for p in LIVE]
+    src = ClaudeSource(
+        make_dir(tmp_path), show_args=set(), proc_reader=Exploding(LIVE),
+        psutil_mod=FakePsutil(procs), git=StubGit({}),
+    )
+    assert sorted(by_pid(src.collect(ctx()))) == [4000, 4002]
+
+
+class ChainPsutil(FakePsutil):
+    """A lazily generated 100000 process table: one deep chain below session 4000."""
+
+    def __init__(self):
+        super().__init__([FakeProc(4000, 1)])
+        self.consumed = 0
+
+    def process_iter(self):
+        for i in range(100_000):
+            self.consumed += 1
+            yield FakeProc(4001 + i, 4000 + i, ["/bin/x"], cwd="/")
+
+
+def test_process_table_is_read_lazily_to_its_cap_and_depth_is_bounded(tmp_path):
+    ps = ChainPsutil()
+    src = ClaudeSource(
+        make_dir(tmp_path, ("4000",)), show_args=set(), proc_reader=StubProcs({4000: "111000"}),
+        psutil_mod=ps, git=StubGit({}),
+    )
+    res = src.collect(ctx())
+    assert ps.consumed == claude.MAX_PROCS == 50_000
+    assert len(res.procs) == claude.MAX_DEPTH_TREE == 12
+    assert [s.pid for s in res.sessions] == [4000]
+
+
+def test_wide_tree_walk_stops_at_the_per_session_cap(tmp_path):
+    calls: list[int] = []
+
+    class Counting(FakeProc):
+        def cmdline(self):
+            calls.append(self.pid)
+            return super().cmdline()
+
+    procs = [FakeProc(4000, 1)] + [Counting(5000 + i, 4000, ["/bin/w"]) for i in range(1000)]
+    res = source(make_dir(tmp_path, ("4000",)), {4000: "111000"}, procs).collect(ctx())
+    assert len(res.procs) == claude.MAX_CHILDREN == 256
+    assert len(calls) == 256  # the walk stopped, rows were not built and then truncated
+
+
+def test_pid_reuse_between_check_and_usage_read_drops_the_row(tmp_path):
+    class Swapping(StubProcs):
+        def __init__(self, table):
+            super().__init__(table)
+            self.calls = 0
+
+        def start_ticks(self, pid):
+            self.calls += 1
+            return "111000" if self.calls == 1 else "222222"  # replaced after the first read
+
+    src = ClaudeSource(
+        make_dir(tmp_path, ("4000",)), show_args=set(), proc_reader=Swapping({}),
+        psutil_mod=FakePsutil([FakeProc(4000, 1, rss=123456)]), git=StubGit({}),
+    )
+    assert src.collect(ctx()).sessions == []
+
+
+def test_create_time_change_between_reads_drops_the_row(tmp_path):
+    class Replaced(FakeProc):
+        reads = 0
+
+        def create_time(self):
+            Replaced.reads += 1
+            return 1_700_000_100.0 + (0 if Replaced.reads == 1 else 5)
+
+    Replaced.reads = 0
+    res = source(make_dir(tmp_path, ("4000",)), {4000: "111000"}, [Replaced(4000, 1)])
+    assert res.collect(ctx()).sessions == []

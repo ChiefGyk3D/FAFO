@@ -7,12 +7,13 @@ Transcripts and anything under the projects directory are never read.
 
 from __future__ import annotations
 
+import contextlib
 import json
-import math
 import os
 import re
 import stat
 import time
+from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,7 +28,10 @@ DEFAULT_DIR = Path("~/.claude/sessions")
 MAX_FILE_BYTES = 64 * 1024
 MAX_ENTRIES = 256  # registry files processed per cycle, newest first
 MAX_SCANNED = 65536  # directory entries examined (stat of names only) before ignoring the rest
-MAX_CHILDREN = 256  # descendants reported per session
+MAX_CHILDREN = 256  # descendants reported per session; also stops the walk
+MAX_PROCS = 50_000  # process table entries read per cycle
+MAX_DEPTH_TREE = 12  # descendant depth walked below a session
+MAX_STARTED_MS = 4_000_000_000_000  # startedAt cap (year 2096)
 MAX_DEPTH = 8
 MAX_NAME = 80
 MAX_TASK = 80
@@ -161,10 +165,11 @@ def _load(dir_fd: int, name: str) -> dict | None:
     return None if data is None else _parse(data)
 
 
-def _num(value: Any) -> float | None:
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+def _started_ms(value: Any) -> int | None:
+    """startedAt in epoch ms. Checked as an int, never converted, so a huge value cannot raise."""
+    if type(value) is not int or not 0 <= value <= MAX_STARTED_MS:
         return None
-    return float(value)
+    return value
 
 
 def _label(value: Any, cap: int) -> str:
@@ -232,13 +237,15 @@ class ClaudeSource:
         entries: list[dict] = []
         try:
             for name in self._names(dir_fd):
-                rec = load_registry_file(dir_fd, name)
-                if rec is None:
-                    ctx.log.debug("claude: skipped an unreadable registry file")
+                try:
+                    rec = load_registry_file(dir_fd, name)
+                    entry = None if rec is None else self._validate(rec, int(name[:-5]))
+                except Exception:  # noqa: BLE001 - one bad file never fails the source
+                    entry = None
+                if entry is None:
+                    ctx.log.debug("claude: skipped an unusable registry file")
                     continue
-                entry = self._validate(rec, int(name[:-5]))
-                if entry is not None:
-                    entries.append(entry)
+                entries.append(entry)
         finally:
             os.close(dir_fd)
         return entries
@@ -247,52 +254,59 @@ class ClaudeSource:
         pid = rec.get("pid")
         sid = rec.get("sessionId")
         ticks = rec.get("procStart")
-        started = _num(rec.get("startedAt"))
+        started = _started_ms(rec.get("startedAt"))
         if type(pid) is not int or pid != file_pid or pid <= 0:
             return None
         if type(sid) is not str or _ID_RE.fullmatch(sid) is None:
             return None
         if type(ticks) is not str or _TICKS_RE.fullmatch(ticks) is None or started is None:
             return None
-        # PID reuse: the process must exist and have the recorded start time.
+        # Bind the process object first, then verify the start time: PID reuse is rejected
+        # here and again after usage is read from this same object (see _add).
+        proc = self.ps.Process(pid)
+        created = float(proc.create_time())
         if self.procs.start_ticks(pid) != ticks:
             return None
-        return {**rec, "started_s": started / 1000.0}
+        return {**rec, "started_s": started / 1000.0, "proc": proc, "created": created}
 
     # -- processes -----------------------------------------------------------------------
-    def _children(self, session_pid: int, live: set[int]) -> list[tuple[Proc, str | None]]:
-        try:
-            root = self.ps.Process(session_pid)
-            kids = list(root.children(recursive=True))
-        except Exception:  # noqa: BLE001 - psutil errors vary; a vanished process drops the rows
-            return []
-        parent = {k.pid: pp for k in kids if (pp := _ppid(k)) is not None}
-        out: list[tuple[Proc, str | None]] = []
-        for k in kids:
-            if len(out) >= MAX_CHILDREN:
-                break
-            if k.pid in live or k.pid not in parent:
-                continue
-            if self._owner(k.pid, parent, live, session_pid) != session_pid:
-                continue
-            row = self._proc_row(k, session_pid)
-            if row is not None:
-                out.append(row)
-        return out
+    def _table(self) -> tuple[dict[int, Any], dict[int, list[int]]]:
+        """One capped process-table snapshot: pid -> process, ppid -> child pids."""
+        procs: dict[int, Any] = {}
+        kids: dict[int, list[int]] = {}
+        # A failing listing leaves what was read so far.
+        with contextlib.suppress(Exception):
+            for p in islice(self.ps.process_iter(), MAX_PROCS):
+                pp = _ppid(p)
+                if pp is None:
+                    continue
+                procs[p.pid] = p
+                kids.setdefault(pp, []).append(p.pid)
+        return procs, kids
 
     @staticmethod
-    def _owner(pid: int, parent: dict[int, int], live: set[int], root: int) -> int | None:
-        """Nearest ancestor that is itself a registered session, bounded walk."""
-        cur = parent.get(pid)
-        for _ in range(len(parent) + 1):
-            if cur is None:
-                return None
-            if cur in live:
-                return cur
-            if cur == root:
-                return root
-            cur = parent.get(cur)
-        return None
+    def _walk(root: int, kids: dict[int, list[int]], live: set[int]) -> list[int]:
+        """Descendant pids, breadth first, stopping at the depth and count caps.
+
+        Another registered session is neither reported nor descended into: its own children
+        belong to it.
+        """
+        found: list[int] = []
+        level = [root]
+        for _ in range(MAX_DEPTH_TREE):
+            nxt: list[int] = []
+            for parent in level:
+                for child in kids.get(parent, ()):
+                    if child in live or child == root:
+                        continue
+                    found.append(child)
+                    if len(found) >= MAX_CHILDREN:
+                        return found
+                    nxt.append(child)
+            if not nxt:
+                break
+            level = nxt
+        return found
 
     def _proc_row(self, p: Any, session_pid: int) -> tuple[Proc, str | None] | None:
         try:
@@ -315,12 +329,19 @@ class ClaudeSource:
             return None
         return row, cwd
 
-    def _own_usage(self, pid: int) -> tuple[float, int] | None:
+    def _own_usage(self, e: dict) -> tuple[float, int] | None:
+        """cpu and rss from the bound process object; None if its identity changed."""
+        pid = e["pid"]
         try:
-            p = self.ps.Process(pid)
-            return max(0.0, float(p.cpu_percent(None))), max(0, int(p.memory_info().rss))
-        except Exception:  # noqa: BLE001 - the process exited between the check and now
+            p = e["proc"]
+            usage = max(0.0, float(p.cpu_percent(None))), max(0, int(p.memory_info().rss))
+            if float(p.create_time()) != e["created"]:
+                return None
+            if self.procs.start_ticks(pid) != e["procStart"]:
+                return None
+        except Exception:  # noqa: BLE001 - the process exited or was replaced
             return None
+        return usage
 
     # -- collect -------------------------------------------------------------------------
     def collect(self, ctx: Ctx) -> SourceResult:
@@ -330,19 +351,23 @@ class ClaudeSource:
         now = ctx.clock()
         live = {e["pid"] for e in entries}
         result = SourceResult()
+        table, tree = self._table() if entries else ({}, {})
         for e in entries:
             try:
-                self._add(result, e, live, now)
+                self._add(result, e, live, now, table, tree)
             except Exception:  # noqa: BLE001 - any single bad entry is skipped
                 ctx.log.debug("claude: skipped an entry that failed")
         return result
 
-    def _add(self, result: SourceResult, e: dict, live: set[int], now: float) -> None:
+    def _add(
+        self, result: SourceResult, e: dict, live: set[int], now: float, table, tree
+    ) -> None:
         pid = e["pid"]
-        usage = self._own_usage(pid)
+        usage = self._own_usage(e)
         if usage is None:
             return
-        kids = self._children(pid, live)
+        kids = [r for r in (self._proc_row(table[c], pid) for c in self._walk(pid, tree, live)
+                            if c in table) if r is not None]
         cwd = e.get("cwd") if type(e.get("cwd")) is str else None
         child_cwds = [c for _, c in kids if c]
         kw: dict[str, Any] = {"now": time.monotonic}
