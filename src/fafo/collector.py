@@ -106,6 +106,7 @@ class Collector:
             Path(views_path) if views_path is not None else self._store_path.with_name("views.json")
         )
         self._write_views_file = write_views_file
+        self.views_write_failures = 0
         self._clock = clock
         self._stop = threading.Event()
         self._states: list[_State] = []
@@ -234,7 +235,12 @@ class Collector:
             now = self._clock()
             write_views(self._views_path, build_views(snap, now), snapshot=snap, generated=now)
         except Exception as exc:  # noqa: BLE001 - views are optional, the snapshot is not
-            _log.warning("views.json write failed: %s", type(exc).__name__)
+            self.views_write_failures += 1
+            n = self.views_write_failures
+            if n == 1 or n % 100 == 0:  # first and every 100th: visible, not one line per tick
+                _log.warning(
+                    "views.json write failed (%d so far): %s", n, type(exc).__name__
+                )
 
     def stop(self) -> None:
         """Ask everything to end. Never joins a worker, so a hung source cannot block it."""

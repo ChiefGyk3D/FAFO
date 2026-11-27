@@ -39,6 +39,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ..model import Snapshot
+from ..store import ensure_private_dir
 from .view import Views, _s
 
 SCHEMA_VERSION = 2
@@ -197,6 +198,7 @@ def write_views(
         payload = encode_bounded(views_to_dict(views, snapshot=snapshot, generated=generated))
     except (ValueError, TypeError, RecursionError) as exc:
         raise OSError(f"views not encodable: {type(exc).__name__}") from None
+    ensure_private_dir(path.parent)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:

@@ -42,6 +42,11 @@ def _ensure_dir(directory: Path) -> None:
         os.chmod(d, stat.S_IRWXU)
 
 
+def ensure_private_dir(directory: Path) -> None:
+    """Public: create missing directories as owner-only (0700); never chmod an existing one."""
+    _ensure_dir(Path(directory))
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -50,7 +55,7 @@ def write_snapshot(
     _before_replace is a test seam called after the temp file is complete and before the rename.
     """
     path = Path(path)
-    _ensure_dir(path.parent)
+    ensure_private_dir(path.parent)
     payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:

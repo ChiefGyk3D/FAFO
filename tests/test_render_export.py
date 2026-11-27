@@ -302,3 +302,21 @@ def test_minimal_fallback_when_nothing_else_fits(monkeypatch):
     doc = json.loads(raw)
     assert doc["schema"] == 2 and doc["session_index"] == [] and doc["session_index_count"] == 3
     assert doc["session_index_truncated"] is True
+
+
+def test_write_creates_missing_parents_owner_only(tmp_path):
+    path = tmp_path / "a" / "b" / "views.json"
+    write_views(path, build_views(snap(1), NOW), generated=NOW)
+    assert json.loads(path.read_text())["schema"] == 2
+    for d in (tmp_path / "a", tmp_path / "a" / "b"):
+        assert stat.S_IMODE(os.stat(d).st_mode) == stat.S_IRWXU
+    assert stat.S_IMODE(os.stat(path).st_mode) == stat.S_IRUSR | stat.S_IWUSR
+
+
+def test_existing_directory_mode_untouched(tmp_path):
+    d = tmp_path / "shared"
+    d.mkdir()
+    os.chmod(d, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP)
+    before = stat.S_IMODE(os.stat(d).st_mode)
+    write_views(d / "views.json", build_views(snap(1), NOW), generated=NOW)
+    assert stat.S_IMODE(os.stat(d).st_mode) == before

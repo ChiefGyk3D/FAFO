@@ -451,3 +451,27 @@ def test_views_file_opt_out(tmp_path):
         wait_for(lambda: read_snapshot(cfg.snapshot_path))
         time.sleep(0.3)
     assert not cfg.snapshot_path.with_name("views.json").exists()
+
+
+def test_persistent_views_failure_logs_once_counts_and_keeps_snapshot(tmp_path, caplog):
+    cfg = make_cfg(tmp_path, counter=fast())
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")  # a regular file as the parent: every views write fails
+    col = Collector(cfg, [Counter()], cfg.snapshot_path, views_path=blocker / "v.json")
+    with caplog.at_level(logging.WARNING, logger="fafo.collector"), Running(col):
+        wait_for(lambda: col.views_write_failures >= 5)
+        assert read_snapshot(cfg.snapshot_path) is not None
+    lines = [r for r in caplog.records if "views.json write failed" in r.getMessage()]
+    assert col.views_write_failures >= 5
+    assert len(lines) == 1 + col.views_write_failures // 100
+    assert "NotADirectoryError" in lines[0].getMessage()
+    assert str(blocker) not in caplog.text
+
+
+def test_views_failure_counter_starts_at_zero_and_stays_on_success(tmp_path):
+    cfg = make_cfg(tmp_path, counter=fast())
+    col = Collector(cfg, [Counter()], cfg.snapshot_path)
+    assert col.views_write_failures == 0
+    with Running(col):
+        wait_for(cfg.snapshot_path.with_name("views.json").exists)
+    assert col.views_write_failures == 0
