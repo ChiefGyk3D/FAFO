@@ -358,3 +358,96 @@ def test_label_never_logged(tmp_path, caplog):
     assert label(tmp_path, "prompt") == ""
     assert "very-unique-name" not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+# -- path cache and per-root keys ---------------------------------------------------------
+def spy_fs(monkeypatch):
+    calls = {"scandir": 0, "lstat": 0}
+    real_scandir, real_lstat = os.scandir, os.lstat
+
+    def scandir(*a, **k):
+        calls["scandir"] += 1
+        return real_scandir(*a, **k)
+
+    def lstat(*a, **k):
+        calls["lstat"] += 1
+        return real_lstat(*a, **k)
+
+    monkeypatch.setattr(transcript.os, "scandir", scandir)
+    monkeypatch.setattr(transcript.os, "lstat", lstat)
+    return calls
+
+
+def test_repeated_calls_scan_once_then_one_lstat_each(tmp_path, monkeypatch):
+    put(tmp_path, [tool("Bash", command="make")])
+    for i in range(20):  # more project dirs make a scan costly
+        (tmp_path / f"-other-{i}").mkdir()
+    calls = spy_fs(monkeypatch)
+    for _ in range(1000):
+        assert label(tmp_path) == "Bash: make"
+    assert calls["scandir"] == 1
+    # One lstat per call, plus the scan's own probes of the directories listed before the hit.
+    assert 1000 <= calls["lstat"] <= 1000 + 21
+
+
+def test_moved_file_triggers_one_rescan(tmp_path, monkeypatch):
+    f = put(tmp_path, [tool("Bash", command="make")])
+    assert label(tmp_path) == "Bash: make"
+    calls = spy_fs(monkeypatch)
+    new_dir = tmp_path / "-moved-proj"
+    new_dir.mkdir()
+    f.rename(new_dir / f.name)
+    assert label(tmp_path) == "Bash: make"
+    assert calls["scandir"] == 1
+    assert label(tmp_path) == "Bash: make"
+    assert calls["scandir"] == 1
+
+
+def test_removed_file_rescans_once_per_window(tmp_path, monkeypatch):
+    f = put(tmp_path, [tool("Bash", command="make")])
+    assert label(tmp_path) == "Bash: make"
+    f.unlink()
+    calls = spy_fs(monkeypatch)
+    assert label(tmp_path, now=T0 + 10) == ""
+    assert calls["scandir"] == 1
+    for _ in range(50):
+        assert label(tmp_path, now=T0 + 20) == ""
+    assert calls["scandir"] == 1
+
+
+def test_session_without_transcript_rescans_at_most_every_30_seconds(tmp_path, monkeypatch):
+    (tmp_path / "-example-proj").mkdir()
+    calls = spy_fs(monkeypatch)
+    for i in range(100):
+        assert label(tmp_path, now=T0 + i * 0.2) == ""  # 20 s of clock
+    assert calls["scandir"] == 1
+    assert label(tmp_path, now=T0 + 31) == ""
+    assert calls["scandir"] == 2
+    put(tmp_path, [tool("Bash", command="make")])  # appears; found at the next window
+    assert label(tmp_path, now=T0 + 40) == ""
+    assert label(tmp_path, now=T0 + 62).startswith("Bash: make")
+
+
+def test_cached_path_turned_symlink_or_directory_is_refused(tmp_path):
+    f = put(tmp_path, [tool("Bash", command="make")])
+    assert label(tmp_path) == "Bash: make"
+    elsewhere = tmp_path / "elsewhere.jsonl"
+    elsewhere.write_text(tool("Grep", pattern="x") + "\n", encoding="utf-8")
+    f.unlink()
+    f.symlink_to(elsewhere)
+    assert label(tmp_path, now=T0 + 6) == ""
+    f.unlink()
+    f.mkdir()
+    assert label(tmp_path, now=T0 + 100) == ""
+
+
+def test_two_roots_same_session_size_and_mtime_do_not_share_labels(tmp_path):
+    a, b = tmp_path / "root-a", tmp_path / "root-b"
+    put(a, [tool("Edit", file_path="/x/aaaa.py")])
+    put(b, [tool("Edit", file_path="/x/bbbb.py")])
+    assert (a / "-example-proj" / f"{SID}.jsonl").stat().st_size == (
+        b / "-example-proj" / f"{SID}.jsonl"
+    ).stat().st_size
+    assert label(a) == "Edit: aaaa.py"
+    assert label(b) == "Edit: bbbb.py"
+    assert label(a) == "Edit: aaaa.py"

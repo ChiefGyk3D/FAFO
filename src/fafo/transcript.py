@@ -31,6 +31,7 @@ PROMPT_CHARS = 60
 IDLE_AFTER_S = 120.0  # older than this, the label gets an age suffix
 MAX_MINUTES = 99
 CACHE_MAX = 512
+RESCAN_S = 30.0  # minimum clock seconds between full scans for a session with no transcript
 ELLIPSIS = "..."
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
@@ -41,12 +42,50 @@ _FILE_TOOLS = {"Read": "file_path", "Edit": "file_path", "Write": "file_path",
                "NotebookEdit": "notebook_path"}
 _AGENT_TOOLS = ("Task", "Agent")
 
-# (session id, mode) -> (size, mtime_ns, mtime_s, label or None). Insertion ordered, bounded.
-_cache: OrderedDict[tuple[str, str], tuple[int, int, float, str | None]] = OrderedDict()
+# (projects dir, session id, mode) -> (size, mtime_ns, mtime_s, label or None). Bounded.
+_cache: OrderedDict[tuple[str, str, str], tuple[int, int, float, str | None]] = OrderedDict()
+# (projects dir, session id) -> (project directory name or None, clock time of the scan). Bounded.
+_paths: OrderedDict[tuple[str, str], tuple[str | None, float]] = OrderedDict()
 
 
 def clear_cache() -> None:
     _cache.clear()
+    _paths.clear()
+
+
+def _check(projects: Path, dirname: str, fname: str) -> os.stat_result | None:
+    try:
+        st = os.lstat(os.path.join(projects, dirname, fname))
+    except OSError:
+        return None
+    ok = stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid()
+    return st if ok else None
+
+
+def _locate_cached(
+    sid: str, projects: Path, now: float
+) -> tuple[str, os.stat_result] | None:
+    """Cached path: one lstat per call. A full directory scan runs only when the cached path
+    fails its checks, and a miss is remembered for RESCAN_S so a session without a
+    transcript costs at most one scan per window."""
+    pk = (os.path.abspath(projects), sid)
+    fname = f"{sid}.jsonl"
+    ent = _paths.get(pk)
+    if ent is not None:
+        dirname, scanned = ent
+        if dirname is not None:
+            st = _check(projects, dirname, fname)
+            if st is not None:
+                _paths.move_to_end(pk)
+                return dirname, st
+        elif now - scanned < RESCAN_S:
+            return None
+    found = _locate(sid, projects)
+    _paths[pk] = (found[0] if found else None, now)
+    _paths.move_to_end(pk)
+    while len(_paths) > CACHE_MAX:
+        _paths.popitem(last=False)
+    return found
 
 
 def _locate(sid: str, projects: Path) -> tuple[str, os.stat_result] | None:
@@ -201,7 +240,7 @@ def _last_prompt(data: bytes) -> str | None:
     return None
 
 
-def _remember(key: tuple[str, str], value: tuple[int, int, float, str | None]) -> None:
+def _remember(key: tuple[str, str, str], value: tuple[int, int, float, str | None]) -> None:
     _cache[key] = value
     _cache.move_to_end(key)
     while len(_cache) > CACHE_MAX:
@@ -233,11 +272,11 @@ def _task_label(sid: str, projects: Path, mode: str, now: float) -> str:
         return ""
     if _ID_RE.fullmatch(sid) is None:
         return ""
-    found = _locate(sid, projects)
+    found = _locate_cached(sid, projects, now)
     if found is None:
         return ""
     dirname, st = found
-    key = (sid, mode)
+    key = (os.path.abspath(projects), sid, mode)
     hit = _cache.get(key)
     if hit is not None and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
         _cache.move_to_end(key)
