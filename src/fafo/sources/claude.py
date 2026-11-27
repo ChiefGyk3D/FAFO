@@ -21,6 +21,7 @@ import psutil
 
 from ..attribution import GitRunner, attribute
 from ..model import Proc, Session, Stamped
+from ..proccache import ProcCache
 from ..redact import mask_credentials, redact_argv, sanitize_text
 from ..source import Ctx, SourceResult
 
@@ -202,12 +203,16 @@ class ClaudeSource:
         proc_reader: ProcReader | None = None,
         psutil_mod: Any = psutil,
         git: GitRunner | None = None,
+        cache: ProcCache | None = None,
     ) -> None:
         self.dir = Path(sessions_dir if sessions_dir is not None else DEFAULT_DIR).expanduser()
         self.show_args = set(show_args or ())
         self.procs: ProcReader = proc_reader or ProcFsReader()
         self.ps = psutil_mod
         self.git = git
+        # Process objects live across cycles so cpu_percent has a previous call to measure from.
+        self.cache = cache if cache is not None else ProcCache(psutil_mod)
+        self._seen: set[tuple[int, float]] = set()
 
     # -- registry ------------------------------------------------------------------------
     def _names(self, dir_fd: int) -> list[str]:
@@ -308,6 +313,15 @@ class ClaudeSource:
             level = nxt
         return found
 
+    def _child_cpu(self, p: Any) -> float:
+        """Cached cpu reading for a child process; 0.0 on first sight or any failure."""
+        try:
+            key = (int(p.pid), float(p.create_time()))
+        except Exception:  # noqa: BLE001 - vanished mid-read
+            return 0.0
+        self._seen.add(key)
+        return self.cache.cpu(key[0], key[1], proc=p)
+
     def _proc_row(self, p: Any, session_pid: int) -> tuple[Proc, str | None] | None:
         try:
             argv = [a for a in p.cmdline() if isinstance(a, str)]
@@ -321,7 +335,7 @@ class ClaudeSource:
                 session_pid=session_pid,
                 agent=_agent_of(argv, p.name()),
                 cmd=redact_argv(argv, self.show_args, value_flags=VALUE_FLAGS),
-                cpu=max(0.0, float(p.cpu_percent(None))),
+                cpu=self._child_cpu(p),
                 rss=max(0, int(p.memory_info().rss)),
                 started=max(0.0, float(p.create_time())),
             )
@@ -334,7 +348,11 @@ class ClaudeSource:
         pid = e["pid"]
         try:
             p = e["proc"]
-            usage = max(0.0, float(p.cpu_percent(None))), max(0, int(p.memory_info().rss))
+            self._seen.add((pid, e["created"]))
+            usage = (
+                self.cache.cpu(pid, e["created"], proc=p),
+                max(0, int(p.memory_info().rss)),
+            )
             if float(p.create_time()) != e["created"]:
                 return None
             if self.procs.start_ticks(pid) != e["procStart"]:
@@ -351,12 +369,14 @@ class ClaudeSource:
         now = ctx.clock()
         live = {e["pid"] for e in entries}
         result = SourceResult()
+        self._seen = set()
         table, tree = self._table() if entries else ({}, {})
         for e in entries:
             try:
                 self._add(result, e, live, now, table, tree)
             except Exception:  # noqa: BLE001 - any single bad entry is skipped
                 ctx.log.debug("claude: skipped an entry that failed")
+        self.cache.end_cycle(self._seen)
         return result
 
     def _add(

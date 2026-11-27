@@ -18,6 +18,7 @@ from typing import Any
 import psutil
 
 from ..model import Proc
+from ..proccache import ProcCache
 from ..redact import redact_argv, sanitize_text
 from ..source import Ctx, SourceResult
 
@@ -188,6 +189,16 @@ def default_lister() -> Iterable[Any]:
     return psutil.process_iter()
 
 
+def default_cache(lister: Lister | None, cache: ProcCache | None) -> ProcCache | None:
+    """The given cache; a new one for the real process table; none for an injected lister.
+
+    An injected lister (tests) supplies its own handles and is read directly.
+    """
+    if cache is not None:
+        return cache
+    return ProcCache(psutil) if lister is None else None
+
+
 def read_table(lister: Lister) -> dict[int, Entry]:
     """Snapshot the process table; processes that vanish or deny access are skipped."""
     table: dict[int, Entry] = {}
@@ -229,15 +240,21 @@ def collect_procs(
     match: Callable[[tuple[str, ...]], bool],
     agent: str,
     show_args: set[str],
+    cache: ProcCache | None = None,
 ) -> SourceResult:
     table = read_table(lister)
     rows: list[Proc] = []
+    seen: set[tuple[int, float]] = set()
     for pid in sorted(table):
         entry = table[pid]
         if not match(entry.argv):
             continue
         try:
-            cpu = float(entry.handle.cpu_percent(None))
+            if cache is None:
+                cpu = float(entry.handle.cpu_percent(None))
+            else:
+                seen.add((pid, entry.started))
+                cpu = cache.cpu(pid, entry.started, proc=entry.handle)
             rss = int(entry.handle.memory_info().rss)
         except (psutil.Error, OSError, ValueError, TypeError):
             continue
@@ -257,16 +274,25 @@ def collect_procs(
         )
         if len(rows) >= MAX_ROWS:
             break
+    if cache is not None:
+        cache.end_cycle(seen)
     return SourceResult(procs=rows, status="ok")
 
 
 class CodexSource:
     name = "codex"
 
-    def __init__(self, lister: Lister | None = None, show_args: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        lister: Lister | None = None,
+        show_args: set[str] | None = None,
+        *,
+        cache: ProcCache | None = None,
+    ) -> None:
+        self._cache = default_cache(lister, cache)
         self._lister: Lister = lister if lister is not None else default_lister
         self._show_args = set(show_args or ())
 
     def collect(self, ctx: Ctx) -> SourceResult:
-        return collect_procs(self._lister, is_codex, "codex", self._show_args)
+        return collect_procs(self._lister, is_codex, "codex", self._show_args, self._cache)
 
