@@ -106,7 +106,8 @@ def test_hung_source_does_not_delay_others(tmp_path):
         wait_for(lambda: (r := read_snapshot(cfg.snapshot_path)) and r.sessions
                  and r.sessions[0].pid > first + 3)
         snap = wait_for(lambda: (r := read_snapshot(cfg.snapshot_path))
-                        and health(r, "hung").status == "stale" and r)
+                        and health(r, "hung").status == "stale"
+                        and "timeout" in health(r, "hung").error and r)
         assert health(snap, "counter").status == "ok"
 
 
@@ -157,6 +158,7 @@ def test_snapshot_written_every_tick_even_if_all_sources_hung(tmp_path):
                 taken.add(r.taken)
             time.sleep(0.03)
         assert len(taken) >= 4
+        wait_for(lambda: "timeout" in health(read_snapshot(cfg.snapshot_path), "hung").error)
         assert health(read_snapshot(cfg.snapshot_path), "hung").status == "stale"
 
 
