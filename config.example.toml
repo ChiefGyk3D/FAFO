@@ -18,6 +18,17 @@
 # Command arguments shown in the process view. Everything else is shown as <arg>.
 show_args = ["exec", "resume", "--resume", "--model"]
 
+# How much of each command line the process view shows.
+#   "allowlist" (default): only the executable and show_args above.
+#   "safe": also short bare words (status, run), flag names, and the base name of a script,
+#           module or path (never its directory). The word after a flag (its value) stays
+#           hidden unless the flag is in show_args; so do URLs, anything with @ : = quotes
+#           or spaces, and secret-looking words. Residual: a bare word that is a positional
+#           argument and does not follow a flag can still show.
+# Security note: "safe" puts more of each command line on screen, in snapshots and in
+# screenshots, so it is off by default. Anything else is a config error.
+# args_mode = "allowlist"
+
 # Every source table takes: enabled (true or false), interval_s and timeout_s
 # (positive numbers, seconds).
 [sources.host]
@@ -34,8 +45,9 @@ timeout_s = 5
 # What the TASK column shows for a session: "off" (state only), "activity" (the default: the
 # last tool and a minimal object, such as "Bash: make" or "Edit: widget.py", plus "(5m ago)"
 # once it is over two minutes old) or "prompt" (the
-# first 60 characters of your last message). "prompt" may show your own prompt text on screen
-# and in screenshots, so use it only if you are comfortable with that.
+# first 60 characters of your last message). "prompt" masking is best effort (token shapes and
+# keyword phrases), so it may still show other sensitive prose on screen and in screenshots;
+# use it only if you are comfortable with that.
 # task_labels = "activity"
 
 [sources.codex]

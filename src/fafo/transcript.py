@@ -228,6 +228,58 @@ def _human_text(doc: dict) -> str | None:
     return None  # tool_result-only and unknown shapes are not human messages
 
 
+_KEYWORDS = frozenset(
+    ["password", "passwd", "pwd", "pass", "passphrase", "secret", "token", "apikey", "api-key", "api_key", "key", "credential", "credentials", "bearer", "auth", "authorization", "cookie", "session", "private"]
+)
+_CONNECTORS = frozenset({"is", "was", "are", "to", "=", ":", "->"})
+MAX_HIDDEN = 2
+MAX_CONNECTORS = 3
+_MASK = "<redacted>"
+
+
+def _hide(word: str) -> str:
+    """Mask of a word that is never longer than the word."""
+    return _MASK if len(word) >= len(_MASK) else "*" * len(word)
+
+
+def mask_phrases(text: str) -> str:
+    """Hide the words that follow a credential keyword, in one linear pass over the tokens.
+
+    `password: hunter2` and `my token is abc` keep the keyword and hide up to MAX_HIDDEN
+    following words (after optional connectors); `password=hunter2` hides the glued value.
+    Best effort and deliberately over-eager: a benign `key binding` loses a word. The result
+    is never longer than the input.
+    """
+    words = text.split(" ")
+    out: list[str] = []
+    i = 0
+    n = len(words)
+    while i < n:
+        w = words[i]
+        i += 1
+        out.append(w)
+        low = w.lower()
+        head, sep, tail = low.partition("=")
+        if not sep:
+            head, sep, tail = low.partition(":")
+        if sep and tail and head in _KEYWORDS:  # glued: keyword=value, keyword:value
+            out[-1] = w[: len(head) + 1] + _hide(w[len(head) + 1 :])
+            continue
+        if low.rstrip(":=,") not in _KEYWORDS:
+            continue
+        skipped = 0
+        while i < n and skipped < MAX_CONNECTORS and words[i].lower() in _CONNECTORS:
+            out.append(words[i])
+            i += 1
+            skipped += 1
+        for _ in range(MAX_HIDDEN):
+            if i >= n or words[i].lower().rstrip(":=,") in _KEYWORDS:
+                break  # a following keyword starts its own window
+            out.append(_hide(words[i]))
+            i += 1
+    return " ".join(out)
+
+
 def _last_prompt(data: bytes) -> str | None:
     for doc in _entries_newest_first(data):
         text = _human_text(doc)
@@ -236,7 +288,9 @@ def _last_prompt(data: bytes) -> str | None:
         text = mask_credentials(sanitize_text(text[:2000], 2000))
         if not text:
             continue
-        return text[:PROMPT_CHARS] + ELLIPSIS if len(text) > PROMPT_CHARS else text
+        # Cut first: the phrase pass only ever sees PROMPT_CHARS characters.
+        cut = mask_phrases(text[:PROMPT_CHARS])
+        return cut + ELLIPSIS if len(text) > PROMPT_CHARS else cut
     return None
 
 

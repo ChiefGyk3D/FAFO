@@ -451,3 +451,83 @@ def test_two_roots_same_session_size_and_mtime_do_not_share_labels(tmp_path):
     assert label(a) == "Edit: aaaa.py"
     assert label(b) == "Edit: bbbb.py"
     assert label(a) == "Edit: aaaa.py"
+
+
+# -- prompt phrase masking ----------------------------------------------------------------
+def prompt_label(tmp_path, text: str) -> str:
+    transcript.clear_cache()
+    put(tmp_path, [human(text)])
+    return label(tmp_path, "prompt")
+
+
+@pytest.mark.parametrize(
+    "text,shown,hidden",
+    [
+        ("password: hunter2", "password:", ["hunter2"]),
+        ("my token is abc123", "my token is", ["abc123"]),
+        ("the key = xyz", "the key =", ["xyz"]),
+        ("Password: Hunter2 please", "Password:", ["Hunter2", "please"]),
+        ("set the API key to abc 123", "set the API key to", ["abc", "123"]),
+        ("PASSWD Is Swordfish1", "PASSWD Is", ["Swordfish1"]),
+        ("the api_key was zzz-top", "the api_key was", ["zzz-top"]),
+    ],
+)
+def test_prompt_keyword_phrases_hide_the_value(tmp_path, text, shown, hidden):
+    got = prompt_label(tmp_path, text)
+    assert got.startswith(shown)
+    for word in hidden:
+        assert word not in got
+
+
+def test_glued_keyword_value_is_hidden(tmp_path):
+    for text in ("password=hunter2 now", "token:abcdef", "API_KEY=zz9top"):
+        assert prompt_label(tmp_path, text).count("hunter2") == 0
+    out = transcript.mask_phrases("password=hunter2 now Token:abcdef")
+    assert out == "password=******* now Token:******"
+
+
+def test_prompt_ten_keywords_in_a_long_prompt_stay_bounded(tmp_path):
+    text = "password a1 token b2 secret c3 key d4 auth e5 cookie f6 session g7 pwd h8 pass i9 x"
+    got = prompt_label(tmp_path, text)
+    assert len(got) <= 63
+    assert not any(v in got for v in ("a1", "b2", "c3", "d4", "e5", "f6"))
+
+
+def test_prompt_cut_happens_before_the_phrase_pass(tmp_path, monkeypatch):
+    seen: list[int] = []
+    real = transcript.mask_phrases
+    monkeypatch.setattr(transcript, "mask_phrases", lambda t: (seen.append(len(t)), real(t))[1])
+    got = prompt_label(tmp_path, "password " * 6_000)
+    assert seen and max(seen) <= transcript.PROMPT_CHARS
+    assert len(got) <= 80
+
+
+def test_prompt_benign_keyword_hides_at_most_two_words(tmp_path):
+    got = prompt_label(tmp_path, "fix the key binding in the table")
+    assert got.startswith("fix the key ")
+    assert got.endswith(" the table")
+    assert "binding" not in got and " in " not in got
+
+
+def test_mask_phrases_never_lengthens_and_keeps_keyword():
+    for text in ("key a b", "password x", "token=1", "secret is z", "key", "", "auth: a  b"):
+        out = transcript.mask_phrases(text)
+        assert len(out) <= len(text)
+    assert transcript.mask_phrases("key to ab cd").startswith("key to")
+
+
+def test_property_keyword_connector_value_never_shows_the_value():
+    import random
+
+    rng = random.Random(1234)
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    keys = sorted(transcript._KEYWORDS)
+    conns = ["", " is", " was", " are", " to", " =", " :", " ->", ":", "="]
+    for _ in range(500):
+        key = rng.choice(keys)
+        key = key.upper() if rng.random() < 0.3 else key
+        value = "".join(rng.choice(alphabet) for _ in range(rng.randint(3, 14))) + "Q9"
+        conn = rng.choice(conns)
+        glue = conn in (":", "=")
+        text = f"{key}{conn}{value}" if glue else f"{key}{conn} {value}"
+        assert value not in transcript.mask_phrases(text), text

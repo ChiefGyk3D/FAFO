@@ -72,16 +72,17 @@ def _claude(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
     return ClaudeSource(
         _path(d) if d else None,
         show_args=set(cfg.show_args),
+        args_mode=cfg.args_mode,
         task_labels=scfg.options.get("task_labels", "activity"),
     )
 
 
 def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
-    return CodexSource(show_args=set(cfg.show_args))
+    return CodexSource(show_args=set(cfg.show_args), args_mode=cfg.args_mode)
 
 
 def _gemini(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
-    return GeminiSource(show_args=set(cfg.show_args))
+    return GeminiSource(show_args=set(cfg.show_args), args_mode=cfg.args_mode)
 
 
 def _ollama(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
