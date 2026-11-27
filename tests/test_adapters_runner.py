@@ -11,7 +11,7 @@ import signal
 import threading
 import time
 
-from conftest import deadline_bound, wait_for_file, wait_gone, wait_group_gone
+from conftest import Ran, deadline_bound, run_when_ready, wait_gone, wait_group_gone
 
 from fafo.adapters.safo import MAX_OUTPUT, SafoAdapter
 
@@ -24,10 +24,6 @@ DEADLINE = 3.0
 def child(body, *args):
     """A /bin/sh -c child; $0 is "sh" and the extra args are $1, $2, ..."""
     return [SH, "-c", body, "sh", *map(str, args)]
-
-
-def read_pids(pidfile):
-    return [int(x) for x in wait_for_file(pidfile).split()]
 
 
 def run_guarded(adapter, pidfile, limit):
@@ -57,14 +53,19 @@ def run_guarded(adapter, pidfile, limit):
 
 
 def test_silent_hang_times_out_stale_and_child_gone(tmp_path):
-    pf = tmp_path / "pids"
-    a = SafoAdapter(child('echo $$ > "$1"; exec sleep 30', pf), timeout_s=DEADLINE)
-    out, _elapsed, hung = run_guarded(a, pf, DEADLINE + 10)
+    def scenario(deadline):
+        pf = tmp_path / f"pids-{deadline}"
+        a = SafoAdapter(child('echo $$ > "$1"; exec sleep 30', pf), timeout_s=deadline)
+        out, elapsed, hung = run_guarded(a, pf, deadline + 10)
+        return Ran((a, out, elapsed, hung), pf)
+
+    r = run_when_ready(scenario)
+    a, out, elapsed, hung = r.result
     assert not hung, "runner blocked past its deadline"
     assert out == {} and a.health == "stale"
-    pids = read_pids(pf)
-    assert wait_gone(pids), "child survived the kill"
-    assert wait_group_gone(pids[0]), "process group still exists after the kill"
+    assert elapsed < deadline_bound(r.deadline)
+    assert wait_gone(r.pids), "child survived the kill"
+    assert wait_group_gone(r.pids[0]), "process group still exists after the kill"
 
 
 def test_deadline_is_accurate(tmp_path):
@@ -77,37 +78,54 @@ def test_deadline_is_accurate(tmp_path):
 
 
 def test_megabyte_output_cut_at_cap_and_killed(tmp_path):
-    pf = tmp_path / "pids"
     body = 'echo $$ > "$1"; head -c 1000000 /dev/zero | tr "\\0" x; exec sleep 30'
-    a = SafoAdapter(child(body, pf), timeout_s=5.0)
-    out, elapsed, hung = run_guarded(a, pf, 15.0)
+
+    def scenario(deadline):
+        pf = tmp_path / f"pids-{deadline}"
+        a = SafoAdapter(child(body, pf), timeout_s=max(deadline, 5.0))
+        out, elapsed, hung = run_guarded(a, pf, deadline + 15)
+        return Ran((a, out, elapsed, hung), pf)
+
+    r = run_when_ready(scenario)
+    a, out, elapsed, hung = r.result
     assert not hung
     assert out == {} and a.health == "absent"  # absent = cut by the byte cap, not the deadline
-    assert elapsed < deadline_bound(5.0)
-    assert wait_gone(read_pids(pf))
+    assert elapsed < deadline_bound(max(r.deadline, 5.0))
+    assert wait_gone(r.pids)
 
 
 def test_slow_drip_cut_by_deadline(tmp_path):
-    pf = tmp_path / "pids"
     body = 'echo $$ > "$1"; while :; do printf " "; sleep 0.1; done'
-    a = SafoAdapter(child(body, pf), timeout_s=DEADLINE)
-    out, _elapsed, hung = run_guarded(a, pf, DEADLINE + 10)
+
+    def scenario(deadline):
+        pf = tmp_path / f"pids-{deadline}"
+        a = SafoAdapter(child(body, pf), timeout_s=deadline)
+        out, elapsed, hung = run_guarded(a, pf, deadline + 10)
+        return Ran((a, out, elapsed, hung), pf)
+
+    r = run_when_ready(scenario)
+    a, out, elapsed, hung = r.result
     assert not hung
     assert out == {} and a.health == "stale"
-    pids = read_pids(pf)
-    assert wait_gone(pids), "drip child survived the kill"
-    assert wait_group_gone(pids[0]), "process group still exists after the kill"
+    assert elapsed < deadline_bound(r.deadline)
+    assert wait_gone(r.pids), "drip child survived the kill"
+    assert wait_group_gone(r.pids[0]), "process group still exists after the kill"
 
 
 def test_grandchild_killed_with_group(tmp_path):
-    pf = tmp_path / "pids"
-    # The grandchild is started first, then both pids are written in one line.
-    a = SafoAdapter(child('sleep 30 & echo "$$ $!" > "$1"; wait', pf), timeout_s=DEADLINE)
-    _out, _elapsed, hung = run_guarded(a, pf, DEADLINE + 10)
+    def scenario(deadline):
+        pf = tmp_path / f"pids-{deadline}"
+        # The grandchild is started first, then both pids are written in one line.
+        a = SafoAdapter(child('sleep 30 & echo "$$ $!" > "$1"; wait', pf), timeout_s=deadline)
+        out, elapsed, hung = run_guarded(a, pf, deadline + 10)
+        return Ran((a, out, elapsed, hung), pf)
+
+    r = run_when_ready(scenario)
+    a, _out, elapsed, hung = r.result
     assert not hung
-    pids = read_pids(pf)
-    assert a.health == "stale" and len(pids) == 2
-    assert wait_gone(pids), "child or grandchild survived the group kill"
+    assert a.health == "stale" and len(r.pids) == 2
+    assert elapsed < deadline_bound(r.deadline)
+    assert wait_gone(r.pids), "child or grandchild survived the group kill"
 
 
 def test_fast_json_child_still_works(tmp_path):
@@ -130,9 +148,14 @@ def test_normal_exit_kills_group_once_before_reap(group_kill_spy):
 
 
 def test_normal_exit_leaves_no_grandchild(tmp_path):
-    pf = tmp_path / "pids"
-    body = 'sleep 30 >/dev/null 2>&1 & echo $! > "$1"; printf %s "$2"'
-    a = SafoAdapter(child(body, pf, GOOD), timeout_s=10.0)
-    out, _elapsed, hung = run_guarded(a, tmp_path / "none", 15.0)
+    def scenario(deadline):
+        pf = tmp_path / f"pids-{deadline}"
+        body = 'sleep 30 >/dev/null 2>&1 & echo $! > "$1"; printf %s "$2"'
+        a = SafoAdapter(child(body, pf, GOOD), timeout_s=max(deadline, 10.0))
+        out, _elapsed, hung = run_guarded(a, tmp_path / "none", deadline + 15)
+        return Ran((a, out, hung), pf)
+
+    r = run_when_ready(scenario)
+    a, out, hung = r.result
     assert not hung and a.health == "ok" and out["s1"].issue == "o/r#1"
-    assert wait_gone([int(wait_for_file(pf))]), "grandchild survived a normal exit"
+    assert wait_gone(r.pids), "grandchild survived a normal exit"

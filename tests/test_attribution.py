@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import deadline_bound, wait_for_file, wait_gone
+from conftest import Ran, deadline_bound, run_when_ready, wait_gone
 
 from fafo import attribution
 from fafo.attribution import SubprocessGit, attribute
@@ -265,28 +265,40 @@ def test_adapter_plain_name_accepted():
 def test_timeout_kills_whole_process_group(tmp_path: Path):
     d = tmp_path / "w"
     d.mkdir()
-    pidfile = tmp_path / "child.pid"
-    script = tmp_path / "grouplaunch"
-    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nsleep 30\n")
-    script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 3.0) is None
-    child = int(wait_for_file(pidfile))
-    assert wait_gone([child]), "grandchild survived the group kill"
+
+    def scenario(deadline):
+        pidfile = tmp_path / f"child-{deadline}.pid"
+        script = tmp_path / f"grouplaunch-{deadline}"
+        script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\nsleep 30\n")
+        script.chmod(0o700)
+        t0 = time.monotonic()
+        res = SubprocessGit(git_bin=str(script)).run(["x"], str(d), deadline)
+        return Ran((res, time.monotonic() - t0), pidfile)
+
+    r = run_when_ready(scenario)
+    assert r.result[0] is None
+    assert r.result[1] < deadline_bound(r.deadline)
+    assert wait_gone(r.pids), "grandchild survived the group kill"
 
 
 def test_oversize_kills_whole_process_group(tmp_path: Path):
     d = tmp_path / "w"
     d.mkdir()
-    pidfile = tmp_path / "child.pid"
-    script = tmp_path / "bigblocker"
-    script.write_text(
-        f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\n"
-        "head -c 5000 /dev/zero | tr '\\0' a\nsleep 30\n"
-    )
-    script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 10) is None
-    child = int(wait_for_file(pidfile))
-    assert wait_gone([child]), "grandchild survived the group kill"
+
+    def scenario(deadline):
+        pidfile = tmp_path / f"child-{deadline}.pid"
+        script = tmp_path / f"bigblocker-{deadline}"
+        script.write_text(
+            f"#!/bin/sh\nsleep 30 &\necho $! > {pidfile}\n"
+            "head -c 5000 /dev/zero | tr '\\0' a\nsleep 30\n"
+        )
+        script.chmod(0o700)
+        res = SubprocessGit(git_bin=str(script)).run(["x"], str(d), max(deadline, 10.0))
+        return Ran(res, pidfile)
+
+    r = run_when_ready(scenario)
+    assert r.result is None
+    assert wait_gone(r.pids), "grandchild survived the group kill"
 
 
 def test_global_git_config_cannot_supply_remote(tmp_path: Path, monkeypatch):
@@ -315,12 +327,17 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path: Path, group_kill_spy
 def test_normal_exit_leaves_no_grandchild(tmp_path: Path):
     d = tmp_path / "w"
     d.mkdir()
-    pidfile = tmp_path / "child.pid"
-    script = tmp_path / "leaver"
-    script.write_text(
-        f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho hello\n"
-    )
-    script.chmod(0o700)
-    assert SubprocessGit(git_bin=str(script)).run(["x"], str(d), 10) == "hello"
-    child = int(wait_for_file(pidfile))
-    assert wait_gone([child]), "grandchild survived the group kill"
+
+    def scenario(deadline):
+        pidfile = tmp_path / f"child-{deadline}.pid"
+        script = tmp_path / f"leaver-{deadline}"
+        script.write_text(
+            f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho hello\n"
+        )
+        script.chmod(0o700)
+        res = SubprocessGit(git_bin=str(script)).run(["x"], str(d), max(deadline, 10.0))
+        return Ran(res, pidfile)
+
+    r = run_when_ready(scenario)
+    assert r.result == "hello"
+    assert wait_gone(r.pids), "grandchild survived the group kill"

@@ -12,7 +12,7 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
-from conftest import deadline_bound, wait_for_file, wait_gone
+from conftest import Ran, deadline_bound, run_when_ready, wait_gone
 
 from fafo.config import SourceCfg
 from fafo.source import Ctx
@@ -86,8 +86,8 @@ def make_src(probe=None, **kw):
     return HostSource(probe=probe or StubProbe(), **kw)
 
 
-def write_script(tmp_path: Path, body: str) -> str:
-    p = tmp_path / "nvidia-smi"
+def write_script(tmp_path: Path, body: str, name: str = "nvidia-smi") -> str:
+    p = tmp_path / name
     p.write_text("#!/bin/sh\n" + body + "\n")
     p.chmod(stat.S_IRWXU)
     return str(p)
@@ -147,32 +147,35 @@ def test_nvidia_failure_exit_ignored(tmp_path):
 
 
 def test_nvidia_hang_cut_by_deadline_group_killed(tmp_path):
-    pidfile = tmp_path / "pid"
-    exe = write_script(tmp_path, f"sh -c 'echo $$ > {pidfile}; exec sleep 30' &\nwait")
-    src = make_src(nvidia_smi=exe, gpu_timeout_s=3.0)
-    box: dict = {}
+    def scenario(deadline):
+        pidfile = tmp_path / f"pid-{deadline}"
+        exe = write_script(
+            tmp_path, f"sh -c 'echo $$ > {pidfile}; exec sleep 30' &\nwait", f"smi-{deadline}"
+        )
+        src = make_src(nvidia_smi=exe, gpu_timeout_s=deadline)
+        box: dict = {}
 
-    def run():
-        box["res"] = src.collect(make_ctx())
+        def run():
+            box["res"] = src.collect(make_ctx())
 
-    t0 = time.monotonic()
-    th = threading.Thread(target=run, daemon=True)
-    th.start()
-    th.join(15)  # guard: a missing deadline fails here instead of hanging the suite
-    alive = th.is_alive()
-    elapsed = time.monotonic() - t0
-    pid = int(pidfile.read_text()) if pidfile.exists() and pidfile.read_text().strip() else None
+        t0 = time.monotonic()
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        th.join(deadline + 12)  # guard: a missing deadline fails here instead of hanging
+        box["alive"] = th.is_alive()
+        box["elapsed"] = time.monotonic() - t0
+        return Ran(box, pidfile)
+
+    r = run_when_ready(scenario)
+    box = r.result
     try:
-        assert not alive, "collect hung past the deadline"
-        assert elapsed < deadline_bound(3.0)
-        pid = int(wait_for_file(pidfile))
+        assert not box["alive"], "collect hung past the deadline"
+        assert box["elapsed"] < deadline_bound(r.deadline)
         assert "gpus" not in box["res"].host
         assert box["res"].host["load1"] == 0.5
-        if pid is not None and wait_gone([pid]):
-            pid = None
-        assert pid is None, "child survived the deadline"
+        assert wait_gone(r.pids), "child survived the deadline"
     finally:
-        if pid is not None:  # only a test failure leaves it; kill the exact pid we recorded
+        for pid in r.pids:  # only a test failure leaves it; kill the exact pid we recorded
             try:
                 os.kill(pid, 9)
             except ProcessLookupError:
@@ -277,13 +280,19 @@ def test_normal_exit_kills_group_once_before_reap(tmp_path, group_kill_spy):
 def test_normal_exit_leaves_no_grandchild(tmp_path):
     from fafo.sources.host import _MIN_ENV, _run_capped
 
-    pidfile = tmp_path / "gpid"
-    exe = write_script(
-        tmp_path, f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho '0, n, 1, 2, 3'"
-    )
-    assert b"0, n" in _run_capped([exe], 10.0, _MIN_ENV)
-    pid = int(wait_for_file(pidfile))
-    if wait_gone([pid]):
+    def scenario(deadline):
+        pidfile = tmp_path / f"gpid-{deadline}"
+        exe = write_script(
+            tmp_path,
+            f"sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\necho '0, n, 1, 2, 3'",
+            f"smi-{deadline}",
+        )
+        return Ran(_run_capped([exe], max(deadline, 10.0), _MIN_ENV), pidfile)
+
+    r = run_when_ready(scenario)
+    assert b"0, n" in r.result
+    if wait_gone(r.pids):
         return
-    os.kill(pid, 9)
+    for pid in r.pids:
+        os.kill(pid, 9)
     raise AssertionError("grandchild survived a normal exit")
