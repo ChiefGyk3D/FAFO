@@ -241,6 +241,8 @@ def collect_procs(
     agent: str,
     show_args: set[str],
     cache: ProcCache | None = None,
+    *,
+    args_mode: str = "allowlist",
 ) -> SourceResult:
     table = read_table(lister)
     rows: list[Proc] = []
@@ -265,7 +267,10 @@ def collect_procs(
                 session_pid=owning_claude(table, entry),
                 agent=sanitize_text(agent, 32),
                 cmd=sanitize_text(
-                    redact_argv(list(entry.argv), show_args, value_flags=VALUE_FLAGS), 1000
+                    redact_argv(
+                        list(entry.argv), show_args, value_flags=VALUE_FLAGS, mode=args_mode
+                    ),
+                    1000,
                 ),
                 cpu=cpu,
                 rss=rss,
@@ -288,11 +293,15 @@ class CodexSource:
         show_args: set[str] | None = None,
         *,
         cache: ProcCache | None = None,
+        args_mode: str = "allowlist",
     ) -> None:
+        self._args_mode = args_mode
         self._cache = default_cache(lister, cache)
         self._lister: Lister = lister if lister is not None else default_lister
         self._show_args = set(show_args or ())
 
     def collect(self, ctx: Ctx) -> SourceResult:
-        return collect_procs(self._lister, is_codex, "codex", self._show_args, self._cache)
+        return collect_procs(
+            self._lister, is_codex, "codex", self._show_args, self._cache, args_mode=self._args_mode
+        )
 

@@ -18,7 +18,9 @@ from __future__ import annotations
 import re
 import unicodedata
 
+ARGS_MODES = ("allowlist", "safe")
 ARG = "<arg>"
+SCRIPT = "<script>"
 ENV = "<env>"
 EXE = "<exe>"
 MASK = "<redacted>"
@@ -27,6 +29,7 @@ MAX_TOKENS = 64
 MAX_REDACTED_LEN = 1000
 
 MAX_TOKEN_LEN = 256
+SAFE_MAX_TOKENS = 12
 
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}=")
 _SAFE_EXE = re.compile(r"^[A-Za-z0-9_.+-]{1,256}$")
@@ -97,9 +100,19 @@ def _keep(value: str, name: str | None = None) -> str:
 
 
 def redact_argv(
-    argv: list[str], show_args: set[str], *, value_flags: frozenset[str] = frozenset()
+    argv: list[str],
+    show_args: set[str],
+    *,
+    value_flags: frozenset[str] = frozenset(),
+    mode: str = "allowlist",
 ) -> str:
-    """Render argv for display. Keeps the executable basename and shown args only."""
+    """Render argv for display. Keeps the executable basename and shown args only.
+
+    mode "safe" additionally shows conservative, fixed-shape parts of the rest (see
+    _safe_tail); the default "allowlist" shows nothing beyond show_args.
+    """
+    if mode not in ARGS_MODES:
+        raise ValueError("mode must be 'allowlist' or 'safe'")
     out: list[str] = []
     items = list(argv[: MAX_TOKENS * 4])
     shown = {_normalize(a) for a in show_args if isinstance(a, str) and len(a) <= MAX_TOKEN_LEN}
@@ -133,8 +146,18 @@ def redact_argv(
     if i < n:
         exe = norm(i)
         base = exe.rsplit("/", 1)[-1] if exe is not None else ""
-        out.append(base if _SAFE_EXE.match(base) and not _is_credential(base) else EXE)
+        exe_ok = _SAFE_EXE.match(base) and not _is_credential(base)
+        out.append(base if exe_ok else EXE)
+        interp = base if exe_ok and (base in _INTERPRETERS or _PYTHON.match(base)) else None
         i += 1
+    else:
+        interp = None
+
+    if mode == "safe":
+        _safe_tail(items, i, shown, valued, interp, out)
+        if len(out) > SAFE_MAX_TOKENS:
+            out = [*out[:SAFE_MAX_TOKENS], "..."]
+        return sanitize_text(" ".join(out), MAX_REDACTED_LEN)
 
     while i < n:
         tok = norm(i)
@@ -163,6 +186,140 @@ def redact_argv(
     if len(out) > MAX_TOKENS:
         out = [*out[:MAX_TOKENS], "..."]
     return sanitize_text(" ".join(out), MAX_REDACTED_LEN)
+
+
+# ---- Safe mode (args_mode = "safe") ----
+
+_INTERPRETERS = frozenset(
+    {"python", "python3", "node", "nodejs", "bun", "bash", "sh", "zsh", "ruby", "perl", "uv",
+     "npx", "pipx"}
+)
+_PYTHON = re.compile(r"^python3\.[0-9]{1,2}$")
+_FLAG_NAME = re.compile(r"^-{1,2}[A-Za-z][A-Za-z0-9-]{0,30}$")
+_WORD = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
+_SCRIPT_WORD = re.compile(r"^[A-Za-z0-9_.+-]{1,60}$")
+_PATH_CHARS = re.compile(r"^[A-Za-z0-9_.+/~-]+$")
+# Known credential prefixes anywhere in a word (the main pattern needs a word boundary).
+_EMBEDDED_PREFIX = re.compile(
+    r"(?i)(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|akia|aiza|eyj)[A-Za-z0-9_-]{10,}"
+)
+_CODE_CLUSTER = re.compile(r"^-[A-Za-z]{1,5}$")
+_HEADER_WORDS = frozenset({"bearer", "basic", "authorization"})
+_SINGLE_DASH_MAX = 5  # letters after a single dash; longer is likely an option with a glued value
+
+
+def _secretish(word: str) -> bool:
+    """Credential-shaped by the redactor's patterns, or long and digit-bearing (hash, base64)."""
+    if _is_credential(word) or _EMBEDDED_PREFIX.search(word):
+        return True
+    return len(word) >= 16 and any(c.isdigit() for c in word)
+
+
+def _flag_ok(name: str) -> bool:
+    """A flag name that may be shown: fixed shape, not secret-named, not credential-shaped."""
+    if not _FLAG_NAME.match(name):
+        return False
+    if not name.startswith("--"):
+        if len(name) - 1 > _SINGLE_DASH_MAX:
+            return False
+        if len(name) > 2 and name[1] in "pP":  # -psecret: a glued password
+            return False
+    return not _secret_name(name.lstrip("-")) and not _secretish(name)
+
+
+def _safe_word(tok: str, pattern: re.Pattern[str], *, any_path: bool) -> str:
+    """The safe display of a positional: a bare word, or the basename of a path, else ARG."""
+    if "/" in tok:
+        if not _PATH_CHARS.match(tok) or not (any_path or tok.startswith(("/", "./", "~"))):
+            return ARG
+        if _CREDENTIAL_VALUE.search(tok):
+            return ARG
+        word = tok.rsplit("/", 1)[-1]
+    else:
+        word = tok
+    if not pattern.match(word) or _secretish(word):
+        return ARG
+    return word
+
+
+def _is_code_flag(tok: str) -> bool:
+    if tok in ("--eval", "-E"):
+        return True
+    return bool(_CODE_CLUSTER.match(tok)) and ("c" in tok or "e" in tok)
+
+
+def _safe_tail(
+    items: list[str],
+    i: int,
+    shown: set[str],
+    valued: set[str],
+    interp: str | None,
+    out: list[str],
+) -> None:
+    """Append the safe-mode rendering of items[i:] to out (stops once out exceeds the cap)."""
+    n = len(items)
+    prev_secret = False  # the previous token was a secret-named flag: this one is its value
+    script_pending = interp is not None  # first non-option argument of an interpreter
+    python = interp is not None and interp.startswith("python")
+
+    def norm(idx: int) -> str | None:
+        tok = items[idx]
+        if not isinstance(tok, str) or len(tok) > MAX_TOKEN_LEN:
+            return None
+        return _normalize(tok)
+
+    while i < n and len(out) <= SAFE_MAX_TOKENS:
+        tok = norm(i)
+        i += 1
+        if tok is None:
+            out.append(ARG)
+            prev_secret = False
+            continue
+        prev, prev_secret = prev_secret, False
+        if tok in shown:
+            if tok in valued and i < n and isinstance(items[i], str):
+                nxt = norm(i)
+                if nxt is None or not nxt.startswith("-"):
+                    out.append(_keep(tok))
+                    out.append(_keep(nxt, tok) if nxt is not None else MASK)
+                    i += 1
+                    continue
+            out.append(_keep(tok))
+            continue
+        if tok.startswith("-"):
+            name, eq, value = tok.partition("=")
+            if eq and name in shown and name in valued:
+                out.append(f"{_keep(name)}={_keep(value, name)}")
+            elif interp is not None and not eq and _is_code_flag(tok):
+                out.append(tok if _flag_ok(tok) or _CODE_CLUSTER.match(tok) else ARG)
+                out.append(SCRIPT)
+                return
+            elif python and tok == "-m":
+                out.append(tok)
+                script_pending = False
+                if i < n:
+                    mod = norm(i)
+                    i += 1
+                    out.append(ARG if mod is None else _safe_word(mod, _SCRIPT_WORD, any_path=False))
+            elif eq:
+                out.append(f"{name}={ARG}" if _flag_ok(name) else ARG)
+            else:
+                out.append(tok if _flag_ok(tok) else ARG)
+                prev_secret = _secret_name(tok.lstrip("-"))
+            continue
+        if tok.lower().rstrip(":") in _HEADER_WORDS:
+            out.append(ARG)
+            prev_secret = True
+            continue
+        if prev:
+            out.append(ARG)
+            script_pending = False
+            continue
+        if script_pending:
+            script_pending = False
+            out.append(_safe_word(tok, _SCRIPT_WORD, any_path=True))
+        else:
+            out.append(_safe_word(tok, _WORD, any_path=False))
 
 
 _ESC_STRING = re.compile(
