@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .redact import ARGS_MODES
 from .repospec import valid_repo
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
@@ -19,13 +20,14 @@ DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
-TOP_KEYS = {"snapshot_path", "show_args", "sources", "aliases"}
+TOP_KEYS = {"snapshot_path", "show_args", "args_mode", "sources", "aliases"}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
+TASK_LABEL_MODES = ("off", "activity", "prompt")
 SECRET_WORDS = ("token", "password", "secret", "key")
 
 # Source-specific option keys, per source. Anything else is an unknown key.
 OPTION_KEYS: dict[str, frozenset[str]] = {
-    "claude": frozenset({"sessions_dir"}),
+    "claude": frozenset({"sessions_dir", "task_labels"}),
     "ollama": frozenset({"url", "admission_log"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
@@ -59,6 +61,7 @@ class Config:
     aliases: dict[str, str]
     snapshot_path: Path
     show_args: set[str]
+    args_mode: str = "allowlist"
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
     _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
@@ -223,6 +226,10 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
         n = f"{p}.{k}"
         if k in ("sessions_dir", "admission_log"):
             out[k] = _opt_path(v, n)
+        elif k == "task_labels":
+            if v not in TASK_LABEL_MODES:
+                raise _bad(n, "must be one of: " + ", ".join(TASK_LABEL_MODES))
+            out[k] = v
         elif k == "url":
             out[k] = _opt_text(v, n, MAX_URL_LEN)
         elif k == "repos":
@@ -323,6 +330,10 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
 
+    args_mode = data.get("args_mode", "allowlist")
+    if not isinstance(args_mode, str) or args_mode not in ARGS_MODES:
+        raise ConfigError("'args_mode' must be \"allowlist\" or \"safe\"")
+
     snap = data.get("snapshot_path")
     if snap is None:
         snapshot_path = _default_snapshot_path()
@@ -336,6 +347,7 @@ def load_config(path: Path | None) -> Config:
         aliases=dict(aliases),
         snapshot_path=snapshot_path,
         show_args=set(show),
+        args_mode=args_mode,
         _alias_re=_compile_aliases(aliases),
         _alias_map=alias_map,
     )

@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"first human question about widgets"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_example_3","name":"Grep","input":{"pattern":"x"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second human message with ghp_exampleexampleexample1234 inside and a long tail that goes on and on past sixty characters"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"},{"type":"tool_use","id":"tu_example_4","name":"Read","input":{"file_path":"/tmp/example/a.txt"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_example_4","content":"tool output that must never be a label"}]}}
