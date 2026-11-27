@@ -65,22 +65,27 @@ MAX_RATIO = 20  # linear is 8, quadratic is 64
 CEILING_S = 5.0
 
 
-def _best_of_3(fn):
+def _best_of_3(fn, timer=time.process_time):
     # process_time (CPU seconds of this process) ignores time spent descheduled on a
     # loaded machine, which is what made wall-clock limits flaky.
     best = None
     for _ in range(3):
-        start = time.process_time()
+        start = timer()
         fn()
-        took = time.process_time() - start
+        took = timer() - start
         best = took if best is None else min(best, took)
     return best
 
 
-def _assert_scales_linearly(fn_for_size, n):
-    """Scale-free check: t(8n)/t(n) stays far below the quadratic ratio of 64."""
-    small = max(_best_of_3(fn_for_size(n)), FLOOR_S)
-    big = _best_of_3(fn_for_size(n * SCALE))
+def _assert_scales_linearly(fn_for_size, n, timer=time.process_time):
+    """Scale-free check: t(8n)/t(n) stays far below the quadratic ratio of 64.
+
+    The baseline is clamped up to FLOOR_S, so a call faster than the floor is judged
+    by t(8n)/FLOOR_S, not by its own (noise-dominated) time. `timer` is injectable so
+    the helper itself can be tested deterministically with a fake clock.
+    """
+    small = max(_best_of_3(fn_for_size(n), timer), FLOOR_S)
+    big = _best_of_3(fn_for_size(n * SCALE), timer)
     assert big < CEILING_S, f"{big:.3f}s at 8n exceeds the ceiling"
     assert big / small < MAX_RATIO, f"ratio {big / small:.1f} (small={small:.4f}s big={big:.4f}s)"
 
@@ -124,21 +129,52 @@ def test_adversarial_1mb_token_is_capped(shape):
     assert redact_argv(["tool", tok], {"--model"}, value_flags=VF).endswith("<arg>")
 
 
-def test_scale_check_bites_on_quadratic_work():
-    """Negative case: the guard itself must fail on quadratic behavior."""
+class _FakeClock:
+    """A timer whose elapsed time is exactly cost(n), with no real CPU involved."""
 
-    def quadratic(n):
+    def __init__(self, cost):
+        self.now = 0.0
+        self.cost = cost
+
+    def __call__(self):
+        return self.now
+
+    def for_size(self, n):
         def go():
-            total = 0
-            for i in range(n):
-                for j in range(n):
-                    total ^= i + j
-            return total
+            self.now += self.cost(n)
 
         return go
 
-    with pytest.raises(AssertionError):
-        _assert_scales_linearly(quadratic, 300)
+
+def test_scale_check_bites_on_quadratic_work():
+    """Negative case, deterministic: time proportional to n squared must fail."""
+    clock = _FakeClock(lambda n: 0.01 * (n / 1000) ** 2)  # 0.01 s at n=1000, ratio 64
+    with pytest.raises(AssertionError, match="ratio"):
+        _assert_scales_linearly(clock.for_size, 1000, timer=clock)
+
+
+def test_scale_check_passes_linear_work():
+    """Positive control, deterministic: time proportional to n must pass (ratio 8)."""
+    clock = _FakeClock(lambda n: 0.01 * (n / 1000))
+    _assert_scales_linearly(clock.for_size, 1000, timer=clock)
+
+
+def test_scale_check_enforces_ceiling():
+    clock = _FakeClock(lambda n: 0.001 * n)  # linear, but 8n takes 8 s
+    with pytest.raises(AssertionError, match="ceiling"):
+        _assert_scales_linearly(clock.for_size, 1000, timer=clock)
+
+
+def test_scale_check_clamps_baseline_to_floor():
+    """A baseline below FLOOR_S is replaced by FLOOR_S, and the ratio is judged against it."""
+    # t(n)=0.5 ms (clamped to 5 ms). t(8n)=0.2 s: true ratio 400, ratio vs floor 40.
+    slow = _FakeClock(lambda n: 0.0005 if n == 1000 else 0.2)
+    with pytest.raises(AssertionError, match="ratio 40"):
+        _assert_scales_linearly(slow.for_size, 1000, timer=slow)
+    # t(n)=0.5 ms, t(8n)=0.05 s: true ratio 100, but vs the floor it is 10, so it passes.
+    # This documents the leniency the floor buys against timer noise on tiny baselines.
+    ok = _FakeClock(lambda n: 0.0005 if n == 1000 else 0.05)
+    _assert_scales_linearly(ok.for_size, 1000, timer=ok)
 
 
 def test_regexes_themselves_are_bounded():
