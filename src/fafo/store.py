@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
+from typing import get_args
 
 from .model import (
     SNAPSHOT_VERSION,
@@ -19,11 +22,17 @@ from .model import (
     Snapshot,
     SourceHealth,
     Stamped,
+    Status,
 )
 
 
-def write_snapshot(path: Path, snap: Snapshot) -> None:
-    """Write via a temp file in the same directory, chmod 0600, then os.replace."""
+def write_snapshot(
+    path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
+) -> None:
+    """Write via a temp file in the same directory, chmod 0600, then os.replace.
+
+    _before_replace is a test seam called after the temp file is complete and before the rename.
+    """
     path = Path(path)
     payload = json.dumps(asdict(snap), separators=(",", ":")).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -33,6 +42,8 @@ def write_snapshot(path: Path, snap: Snapshot) -> None:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
+        if _before_replace is not None:
+            _before_replace()
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -42,40 +53,103 @@ def write_snapshot(path: Path, snap: Snapshot) -> None:
         raise
 
 
-def _build(cls, data):
-    """Build a dataclass from a dict with exactly its fields, else raise TypeError."""
-    if not isinstance(data, dict):
+def _int(v):
+    if type(v) is not int or v < 0:
+        raise TypeError("expected non-negative int")
+
+
+def _opt_int(v):
+    if v is not None:
+        _int(v)
+
+
+def _float(v):
+    if type(v) not in (int, float) or not math.isfinite(v):
+        raise TypeError("expected finite number")
+
+
+def _str(v):
+    if type(v) is not str:
+        raise TypeError("expected str")
+
+
+def _dict(v):
+    if type(v) is not dict:
+        raise TypeError("expected dict")
+
+
+def _status(v):
+    if type(v) is not str or v not in get_args(Status):
+        raise TypeError("bad status")
+
+
+# Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
+_SPEC = {
+    Stamped: {"value": _str, "as_of": _float},
+    Proc: {
+        "pid": _int, "ppid": _int, "session_pid": _opt_int, "agent": _str, "cmd": _str,
+        "cpu": _float, "rss": _int, "started": _float,
+    },
+    LoadedModel: {"name": _str, "vram": _int, "context": _int, "expires": _float},
+    Inflight: {"model": _str, "session_pid": _opt_int, "started": _float},
+    Runner: {
+        "name": _str, "state": _str, "repo": _str, "workflow": _str, "job": _str,
+        "step": _str, "step_n": _int, "step_total": _int, "elapsed": _float,
+        "load": _float, "mem": _float, "disk": _float,
+    },
+    SourceHealth: {"name": _str, "status": _status, "last_ok": _float, "error": _str},
+}
+_SESSION_SPEC = {
+    "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
+    "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
+    "rss": _int,
+}
+
+
+def _check(cls, data, spec):
+    """Require a dict with exactly the dataclass fields and valid scalar values."""
+    if type(data) is not dict:
         raise TypeError("expected object")
-    names = {f.name for f in fields(cls)}
-    if set(data) != names:
+    if set(data) != {f.name for f in fields(cls)}:
         raise TypeError("field mismatch")
+    for name, check in spec.items():
+        check(data[name])
+
+
+def _build(cls, data):
+    _check(cls, data, _SPEC[cls])
     return cls(**data)
 
 
 def _list(cls, data):
-    if not isinstance(data, list):
+    if type(data) is not list:
         raise TypeError("expected list")
     return [_build(cls, item) for item in data]
 
 
 def _session(data) -> Session:
-    if not isinstance(data, dict) or not isinstance(data.get("project"), dict):
+    if type(data) is not dict:
         raise TypeError("bad session")
-    data = {**data, "project": _build(Stamped, data["project"])}
-    return _build(Session, data)
+    _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None})
+    return Session(**{**data, "project": _build(Stamped, data["project"])})
+
+
+def _session_list(data) -> list[Session]:
+    if type(data) is not list:
+        raise TypeError("expected list")
+    return [_session(item) for item in data]
 
 
 def _llm(data) -> LlmServer | None:
     if data is None:
         return None
-    if not isinstance(data, dict):
-        raise TypeError("bad llm")
-    data = {
-        **data,
-        "models": _list(LoadedModel, data.get("models")),
-        "inflight": _list(Inflight, data.get("inflight")),
-    }
-    return _build(LlmServer, data)
+    _check(LlmServer, data, {"queue": _int, "gpu": _dict})
+    return LlmServer(
+        models=_list(LoadedModel, data["models"]),
+        queue=data["queue"],
+        inflight=_list(Inflight, data["inflight"]),
+        gpu=data["gpu"],
+    )
 
 
 def _snapshot(doc) -> Snapshot:
@@ -86,14 +160,14 @@ def _snapshot(doc) -> Snapshot:
         raise ValueError("unsupported version")
     if set(doc) != {f.name for f in fields(Snapshot)}:
         raise TypeError("field mismatch")
-    sessions = doc["sessions"]
-    if not isinstance(sessions, list):
-        raise TypeError("bad sessions")
+    _float(doc["taken"])
+    _dict(doc["host"])
+    _dict(doc["quota"])
     return Snapshot(
         version=version,
         taken=doc["taken"],
         host=doc["host"],
-        sessions=[_session(s) for s in sessions],
+        sessions=_session_list(doc["sessions"]),
         procs=_list(Proc, doc["procs"]),
         llm=_llm(doc["llm"]),
         runners=_list(Runner, doc["runners"]),
