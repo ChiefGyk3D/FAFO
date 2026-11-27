@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -316,3 +317,59 @@ def test_default_get_does_not_follow_redirect(server):
 def test_default_get_caps_body(server):
     with pytest.raises(ValueError):
         default_http_get(server + "/big", 3.0, MAX_BODY)
+
+
+# ---- round 2: whole-call deadline, pid and ts hardening ----
+
+
+def test_slow_drip_server_hits_whole_call_deadline():
+    stop = threading.Event()
+
+    class Drip(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            try:
+                self.send_response(200)
+                self.end_headers()
+                for _ in range(16):  # bounded: ends by itself even if the client does not
+                    if stop.is_set():
+                        break
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    stop.wait(0.5)
+            except OSError:
+                pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Drip)
+    srv.daemon_threads = True
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            default_http_get(f"http://127.0.0.1:{srv.server_address[1]}/x", 2.0, MAX_BODY)
+        assert time.monotonic() - start < 2.0 + 1.5
+    finally:
+        stop.set()
+        srv.shutdown()
+        srv.server_close()
+        t.join(5)
+    assert not t.is_alive()
+
+
+def test_negative_session_pid_treated_as_none(tmp_path):
+    p = log(tmp_path, [ev("admit", "m", -5), ev("busy", "q", -1)])
+    llm = collect(Fake(ps([])), admission_log=p).llm
+    assert [i.session_pid for i in llm.inflight] == [None]
+    assert llm.queue == 1
+
+
+@pytest.mark.parametrize("ts", ["1" + "0" * 400, "1e999", "NaN", "-1", "-Infinity", "5e9"])
+def test_bad_ts_skips_record_without_raising(tmp_path, ts):
+    bad = '{"ts":' + ts + ',"event":"admit","model":"bad","session_pid":1}'
+    assert len(bad) < 4096
+    p = log(tmp_path, [bad, ev("admit", "good", 2, 10.0)])
+    llm = collect(Fake(ps([])), admission_log=p).llm
+    assert [i.model for i in llm.inflight] == ["good"]

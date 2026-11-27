@@ -34,6 +34,7 @@ LOG_TAIL_BYTES = 64 * 1024
 LOG_TAIL_LINES = 200
 MAX_QUEUE = 1000
 MAX_INT = 2**62
+MAX_TS = 4e9
 
 
 @dataclass(frozen=True)
@@ -46,13 +47,31 @@ class HttpResponse:
 HttpGet = Callable[[str, float, int], HttpResponse]
 
 
+READ_TIMEOUT_S = 1.0
+
+
 def default_http_get(url: str, timeout: float, max_bytes: int) -> HttpResponse:
-    """GET with no redirects, no environment proxies or credentials, capped body and time."""
+    """GET with no redirects, no environment proxies or credentials, capped body and time.
+
+    One monotonic deadline covers the whole call. Per-phase timeouts are min(timeout,
+    remaining) with a short read timeout, so a stalled or slow-drip server cannot hold
+    the call past the deadline plus one read timeout.
+    """
     deadline = time.monotonic() + timeout
+
+    def remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("ollama request deadline exceeded")
+        return left
+
+    left = remaining()
     client = httpx.Client(
         follow_redirects=False,
         trust_env=False,
-        timeout=httpx.Timeout(timeout),
+        timeout=httpx.Timeout(
+            connect=left, read=min(READ_TIMEOUT_S, left), write=left, pool=left
+        ),
         headers={"Accept": "application/json"},
     )
     with client, client.stream("GET", url) as resp:
@@ -61,8 +80,7 @@ def default_http_get(url: str, timeout: float, max_bytes: int) -> HttpResponse:
             body += chunk
             if len(body) > max_bytes:
                 raise ValueError("response too large")
-            if time.monotonic() > deadline:
-                raise TimeoutError("response too slow")
+            remaining()
         return HttpResponse(resp.status_code, bytes(body))
 
 
@@ -175,6 +193,17 @@ def _read_tail(path: Path) -> bytes:
         os.close(fd)
 
 
+def _ts(value: object) -> float | None:
+    """Seconds in 0..MAX_TS as a float, else None (the record is skipped)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        ts = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return ts if 0.0 <= ts <= MAX_TS else None  # NaN fails both comparisons
+
+
 def _admission(path: Path | None) -> tuple[int, list[Inflight]]:
     """Derive (queue, inflight) from the log tail. Best effort, never raises."""
     if path is None:
@@ -193,10 +222,11 @@ def _admission(path: Path | None) -> tuple[int, list[Inflight]]:
         if not isinstance(model, str):
             model = ""
         model = sanitize_text(model, MAX_NAME)
-        if isinstance(pid, bool) or not isinstance(pid, int):
+        if isinstance(pid, bool) or not isinstance(pid, int) or not 0 <= pid <= MAX_INT:
             pid = None
-        ts = rec.get("ts")
-        ts = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else 0.0
+        ts = _ts(rec.get("ts"))
+        if ts is None:
+            continue
         key = (model, pid)
         if event == "busy":
             busy[key] = busy.get(key, 0) + 1
