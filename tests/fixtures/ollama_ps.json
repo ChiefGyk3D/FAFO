@@ -1,0 +1,30 @@
+{
+  "models": [
+    {
+      "name": "example-model:12b",
+      "model": "example-model:12b",
+      "size": 11000000000,
+      "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "example",
+        "families": ["example"],
+        "parameter_size": "12B",
+        "quantization_level": "Q4_K_M"
+      },
+      "expires_at": "2026-11-27T15:30:00.123456789-05:00",
+      "size_vram": 10500000000,
+      "context_length": 131072
+    },
+    {
+      "name": "small-model:4b",
+      "model": "small-model:4b",
+      "size": 3400000000,
+      "expires_at": "2026-11-27T20:35:00Z",
+      "size_vram": 3400000000,
+      "context_length": 8192,
+      "future_field": {"anything": [1, 2, 3]}
+    }
+  ]
+}
