@@ -445,7 +445,7 @@ test('a relative viewsPath is refused with a note, never read', { options: { vie
   await clock.advance(2000)
   expect(ctl.reads.count).toBe(0)
   const ui = await draw($, 120)
-  expect((await lines(ui)).some(t => t.startsWith('views.json path not set'))).toBe(true)
+  expect((await lines(ui)).some(t => t.startsWith('viewsPath not allowed'))).toBe(true)
   await ui.unmount()
 })
 
@@ -469,4 +469,49 @@ test('the /fafo command reopens a closed pane and reading resumes', async ($, on
   await $.command.run({ command: 'fafo', args: '' } as never)
   await clock.advance(6000)
   expect(ctl.reads.count).toBeGreaterThan(closedAt)
+})
+
+const REFUSED: [string, string][] = [
+  ['home traversal', '~/../../etc/passwd'],
+  ['absolute traversal', '/home/example/../../etc/passwd'],
+  ['traversal ending in views.json', '~/../../etc/views.json'],
+  ['absolute traversal ending in views.json', '/home/example/../views.json'],
+  ['dot dot in the middle', '~/x/..//views.json'],
+  ['snapshot name', '/home/example/.local/state/fafo/snapshot.json'],
+  ['key file name', '/home/example/.ssh/id_example'],
+  ['control character', '/home/example/fa' + String.fromCharCode(10) + 'fo/views.json'],
+  ['nul', '/home/example/fafo/views.json' + String.fromCharCode(0)],
+  ['dot component', '/home/example/./fafo/views.json'],
+  ['empty component', '/home/example//fafo/views.json'],
+  ['trailing slash', '/home/example/fafo/views.json/'],
+  ['too long', '/home/example/' + 'a/'.repeat(600) + 'views.json'],
+  ['wrong name in home', '~/views.json.bak'],
+]
+
+for (const [label, path] of REFUSED) {
+  test(`viewsPath refused with a fixed status and no read: ${label}`, { options: { viewsPath: path } }, async ($, on) => {
+    const { ctl, clock } = await boot($, on)
+    await clock.advance(6000)
+    expect(ctl.reads.count).toBe(0)
+    const ui = await draw($, 120)
+    const all = await lines(ui)
+    expect(all.some(t => t.startsWith('viewsPath not allowed'))).toBe(true)
+    expect(all.some(t => t.includes('passwd') || t.includes('snapshot'))).toBe(false)
+    await ui.unmount()
+  })
+}
+
+test('valid paths still work: absolute views.json and a ~/ path', async ($, on) => {
+  const { ctl } = await boot($, on)
+  expect(ctl.reads.count).toBeGreaterThan(0)
+})
+
+test('a ~/ path under home with nested folders is read', { options: { viewsPath: '~/a/b/views.json' } }, async ($, on) => {
+  const { ctl } = await boot($, on)
+  expect(ctl.reads.paths[0]).toBe('/home/example/a/b/views.json')
+})
+
+test('a file name other than views.json is refused even when absolute and clean', { options: { viewsPath: '/srv/example/views.json.old' } }, async ($, on) => {
+  const { ctl } = await boot($, on)
+  expect(ctl.reads.count).toBe(0)
 })

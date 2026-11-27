@@ -1,6 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import { buildLines } from './layout'
+import { FILE_NAME, isAllowedPath, underHome } from './path'
 import type { Shown } from './layout'
 import { MAX_BYTES, clean, parseViews } from './views'
 import type { Views } from './views'
@@ -34,18 +35,32 @@ const state: {
   configured: '',
 }
 
-async function resolvePath($: EngineInterface): Promise<string | null> {
+type Resolved = { path: string } | { refused: true } | { unset: true }
+
+async function resolvePath($: EngineInterface): Promise<Resolved> {
   const configured = state.configured
-  if (configured.startsWith('/')) return configured
-  if (configured.startsWith('~/')) {
-    const home = await $.env.get('HOME')
-    return home && home.startsWith('/') ? `${home}${configured.slice(1)}` : null
+  if (configured !== '') {
+    if (configured.startsWith('/')) {
+      return isAllowedPath(configured) ? { path: configured } : { refused: true }
+    }
+    if (configured.startsWith('~/')) {
+      const home = await $.env.get('HOME')
+      if (!home || !home.startsWith('/')) return { refused: true }
+      const full = underHome(home, configured.slice(2))
+      return full === null ? { refused: true } : { path: full }
+    }
+    return { refused: true }
   }
-  if (configured !== '') return null
   const runtime = await $.env.get('XDG_RUNTIME_DIR')
-  if (runtime && runtime.startsWith('/')) return `${runtime}/fafo/views.json`
-  const home = await $.env.get('HOME')
-  return home && home.startsWith('/') ? `${home}/.local/state/fafo/views.json` : null
+  let candidate: string | null = null
+  if (runtime && runtime.startsWith('/')) {
+    candidate = underHome(runtime, `fafo/${FILE_NAME}`)
+  } else {
+    const home = await $.env.get('HOME')
+    if (home && home.startsWith('/')) candidate = underHome(home, `.local/state/fafo/${FILE_NAME}`)
+  }
+  if (candidate === null) return { unset: true }
+  return { path: candidate }
 }
 
 function failure(kind: string): string {
@@ -53,11 +68,16 @@ function failure(kind: string): string {
 }
 
 async function readOnce($: EngineInterface): Promise<void> {
-  const path = await resolvePath($)
-  if (path === null) {
+  const resolved = await resolvePath($)
+  if ('refused' in resolved) {
+    state.note = 'viewsPath not allowed'
+    return
+  }
+  if ('unset' in resolved) {
     state.note = failure('path not set (use an absolute viewsPath)')
     return
   }
+  const path = resolved.path
   let text: string
   try {
     text = await $.fs.read(path, { as: 'text', length: MAX_BYTES + 1 })

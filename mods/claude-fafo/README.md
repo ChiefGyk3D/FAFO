@@ -25,14 +25,15 @@ by the mod seats from 144 columns; below that, run `/fafo` once to seat it at an
 Where the file is, in order:
 
 1. The `viewsPath` option, if set. It must be an absolute path, or `~/` followed by a path
-   under your home folder.
+   under your home folder. The last part must be exactly `views.json`, the path must be
+   at most 1024 characters, and it may not contain `..`, `.`, empty parts or control
+   characters. Anything else shows `viewsPath not allowed` and nothing is read.
 2. `$XDG_RUNTIME_DIR/fafo/views.json`
 3. `~/.local/state/fafo/views.json`
 
 This matches the collector's default. If you pointed the collector somewhere else, set
 `viewsPath` in the plugin's config row (`/config`) or in settings under
-`pluginConfigs["fafo-pane"].options.viewsPath`. A relative path is refused with a note
-in the pane.
+`pluginConfigs["fafo-pane"].options.viewsPath`. A relative path is refused the same way.
 
 ## What it shows
 
