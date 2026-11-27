@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+# The generic legs (ruff, the pytest matrix, the workflow lint) are ChiefGyk3D/git-your-ship-together's
+# python-ci.yml; the scans are its security.yml. `CI green` below is the one gate branch protection requires.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly, so new advisories surface between commits
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@0e0cef39590d96f7c10217b969ab413e88d72024 # v1.39.0
+    permissions:
+      contents: read
+      id-token: write   # Doppler OIDC, when an identity is configured; python-ci keeps it off the test job
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
+    with:
+      python-versions: '["3.11", "3.12", "3.13", "3.14"]'
+      install-command: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]"
+      test-command: pytest
+      lint-install-command: pip install ruff==0.17.5
+      lint-command: ruff check .
+      docker-build: false
+      egress-policy: block
+
+  security:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@0e0cef39590d96f7c10217b969ab413e88d72024 # v1.39.0
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      id-token: write
+    secrets:
+      DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
+    with:
+      pip-audit-requirements: requirements.txt
+      egress-policy: block
+
+  ci-green:
+    name: CI green
+    if: always()
+    needs: [ci, security]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require every leg to pass
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: |
+          echo "ci=$CI_RESULT security=$SECURITY_RESULT"
+          [ "$CI_RESULT" = success ] && [ "$SECURITY_RESULT" = success ]
