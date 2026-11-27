@@ -1,0 +1,7 @@
+{"sessions": [
+  {"session_id": "s1", "issue": "ChiefGyk3D/FAFO#19", "card_status": "In progress",
+   "epic": "FAFO observer", "effort": "M"},
+  {"session_id": "s2", "issue": "ChiefGyk3D/FAFO#12", "card_status": "Next",
+   "epic": "FAFO observer", "effort": "S"},
+  {"session_id": "other", "issue": "x/y#1", "card_status": "Done", "epic": "e", "effort": "L"}
+]}
