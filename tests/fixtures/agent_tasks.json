@@ -1,0 +1,15 @@
+{"tasks": [
+  {"id": "t-1", "state": "in_progress", "name": "Fix the parser",
+   "artifacts": [{"type": "branch", "data": {"head_ref": "copilot/parser", "base_ref": "main"}}],
+   "repo": "example-org/example-repo", "created_at": "2026-11-27T11:00:00Z"},
+  {"id": "t-2", "state": "queued", "name": "Add docs", "artifacts": [],
+   "repo": "example-org/example-repo", "created_at": "2026-11-27T11:10:00Z"},
+  {"id": "t-3", "state": "waiting_for_user", "name": "Needs input", "artifacts": [],
+   "repo": "example-org/example-repo"},
+  {"id": "t-4", "state": "idle", "name": "Idle one", "artifacts": [],
+   "repo": "example-org/example-repo"},
+  {"id": "t-5", "state": "completed", "name": "Done", "artifacts": []},
+  {"id": "t-6", "state": "failed", "name": "Failed", "artifacts": []},
+  {"id": "t-7", "state": "timed_out", "name": "Timed out", "artifacts": []},
+  {"id": "t-8", "state": "cancelled", "name": "Cancelled", "artifacts": []}
+]}
