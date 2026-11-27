@@ -191,3 +191,29 @@ def sanitize_text(s: str, max_len: int = 200) -> str:
     if max_len <= 0:
         return ""
     return _strip(s)[:max_len]
+
+
+def mask_credentials(text: str) -> str:
+    """Mask credential-looking whitespace-separated words in already-rendered text.
+
+    For sources that hand over a finished command line: the argv is gone, so this is
+    defense in depth, not allowlist redaction. Input is capped at 4 * MAX_REDACTED_LEN
+    characters and every word is checked by the same bounded patterns as redact_argv.
+    """
+    if not isinstance(text, str):
+        return ""
+    words = _strip(text[: MAX_REDACTED_LEN * 4]).split()
+    out: list[str] = []
+    mask_next = False
+    for raw in words[: MAX_TOKENS * 16]:
+        word = _normalize(raw)
+        is_flag = word.startswith("-")
+        if (mask_next and not is_flag) or len(word) > MAX_TOKEN_LEN or _is_credential(word):
+            out.append(MASK)
+        else:
+            out.append(word)
+        # The word after a secret-named flag ("--token x", "-p x") or a header scheme is a value.
+        mask_next = word.lower().rstrip(":") in ("bearer", "basic", "authorization") or (
+            is_flag and "=" not in word and _secret_name(word.lstrip("-"))
+        )
+    return " ".join(out)
