@@ -14,7 +14,8 @@ source interval).
 | Phase | Setup | Budget |
 | --- | --- | --- |
 | idle | 7 sessions with 20 children each, static rows, one cheap host source | CPU under 2 percent, RSS under 100 MB |
-| active | 7 sessions with 256 children each, every row changing every call | CPU under 5 percent, RSS under 100 MB |
+| active | 7 sessions with 20 children each, every row changing every call (the typical size) | CPU under 5 percent, RSS under 100 MB |
+| active-cap | 7 sessions with 256 children each, every row changing (the display cap, the worst case); full variant only | CPU under 5 percent, RSS under 100 MB |
 | stress | idle-size rows, busy-loop processes (one per core, at most 8), and a source that answers once and then blocks forever | CPU under 4 percent (2x the idle budget, a contention allowance), RSS under 100 MB, plus the checks below |
 
 Stress checks, on a read of the snapshot and `views.json` every 0.25 s for the whole window:
@@ -29,7 +30,7 @@ Stress checks, on a read of the snapshot and `views.json` every 0.25 s for the w
 
 - Default (CI friendly, under 60 s for the file on an idle machine): `pytest tests/perf`. The idle and active phases
   use a 10 s window. The stress phase uses a 10 s window and 4 loops.
-- Full stress variant (30 s window, 8 loops): `pytest tests/perf -m perf --perf-full`, or set
+- Full variant (adds the active-cap phase; stress uses a 30 s window and 8 loops): `pytest tests/perf -m perf --perf-full`, or set
   `FAFO_PERF_FULL=1`. The `--perf-full` option is registered by `tests/perf/conftest.py`, so it
   is known only when `tests/perf` is part of the invocation; the environment variable works
   anywhere.
@@ -46,20 +47,26 @@ Each JSON line has: `phase`, `cpu_percent`, `rss_mb`, `max_snapshot_gap_s`, `max
 The machine has 8 cores and was heavily loaded by other work (load average 47 to 69 during these
 runs), so CPU times are inflated compared with an idle host.
 
-| Phase | CPU percent of one core | RSS | Max snapshot gap | Notes |
+| Phase | Profile | CPU percent of one core | RSS | Max snapshot gap |
 | --- | --- | --- | --- | --- |
-| idle | 0.4 to 0.6 | 17 to 18 MB | 2.2 s | within budget |
-| active (after the scrub memo) | 3.5 to 4.5 | 21 MB | 2.6 s | within budget, thin margin on a loaded host |
-| active (memo disabled) | 7.5 | 21 MB | 2.2 s | over budget |
-| stress, 10 s, 4 loops | 0.3 to 0.6 | 17 MB | 2.3 s | hung source stale, no parse failures |
-| stress, 30 s, 8 loops | 0.9 (earlier run, before the memo) | 18 MB | 2.2 s | hung source stale, no parse failures |
+| idle | 7x20, static | 0.4 to 0.6 | 17.6 MB | 2.2 s |
+| active | 7x20, changing | 0.5 | 17.6 MB | 2.3 s |
+| active, memo disabled (measurement check) | 7x20, changing | 0.8 | 17.6 MB | n/a |
+| active-cap (full variant, 30 s) | 7x256, changing | 4.5 | 21 MB | 2.9 s |
+| active-cap, before the scrub memo | 7x256, changing | 7.0 to 7.5 | 21 MB | 2.2 s |
+| stress, 10 s, 4 loops | 7x20, static, hung source | 0.3 to 0.6 | 17.6 MB | 2.2 s |
+| stress, 30 s, 8 loops (full) | 7x20, static, hung source | 0.6 | 18 MB | 2.6 s |
 
-The active phase is the worst case the display caps allow (1792 changing process rows). Redacting
-and sanitizing those rows was the main cost (about 0.14 s of CPU per call). The collector now
-memoizes the string scrub per instance (bounded LRU of 8192 entries keyed by kind and the exact
-string, strings over 2000 characters bypass it), which cut the active figure from about 7.5 to
-about 4. The remaining cost is mostly the sanitizing in `build_views`, the dataclass walk and the
-JSON encoding of the snapshot.
+Every JSON line carries a `profile` field naming the profile the number comes from. The typical
+profile has a wide margin (0.5 of 5.0 percent). The display-cap profile (1792 changing process
+rows) is the worst case the caps allow; it runs only in the full variant, with the same 5 percent
+budget, and its 4.5 percent leaves a thin margin on a loaded host.
+
+Redacting and sanitizing rows was the main cost of the cap profile (about 0.14 s of CPU per
+call). The collector memoizes the string scrub per instance (bounded LRU of 8192 entries keyed by
+kind and the exact string; strings over 2000 characters bypass it), which cut the cap figure from
+about 7.5 to about 4.5. The remaining cost is mostly the sanitizing in `build_views`, the
+dataclass walk and the JSON encoding of the snapshot.
 
 ## Revert proof
 

@@ -3,7 +3,7 @@
 The measurement code starts this file as its own process, so the CPU and memory it reads
 belong to the collector alone. Nothing here touches the network or the real machine state.
 
-    python stubs.py --dir DIR --mode idle|active|stress --tick 1.0
+    python stubs.py --dir DIR --mode idle|active|active-cap|stress --tick 2.0
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 SESSIONS = 7
 IDLE_CHILDREN = 20
-ACTIVE_CHILDREN = 256
+CAP_CHILDREN = 256  # the display cap (render.view.MAX_CHILDREN), the worst case
 HUNG_PID = 90001
 SNAPSHOT_NAME = "snapshot.json"
 VIEWS_NAME = "views.json"
@@ -94,7 +94,7 @@ class HungSource:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--mode", choices=("idle", "active", "stress"), required=True)
+    ap.add_argument("--mode", choices=("idle", "active", "active-cap", "stress"), required=True)
     ap.add_argument("--tick", type=float, default=2.0)
     args = ap.parse_args(argv)
 
@@ -102,9 +102,10 @@ def main(argv: list[str] | None = None) -> int:
     from fafo.config import Config, SourceCfg
 
     out = Path(args.dir)
-    active = args.mode == "active"
+    active = args.mode in ("active", "active-cap")
+    children = CAP_CHILDREN if args.mode == "active-cap" else IDLE_CHILDREN
     sources = [
-        AgentsSource(ACTIVE_CHILDREN if active else IDLE_CHILDREN, change=active),
+        AgentsSource(children, change=active),
         HostSource(),
     ]
     scfg = {

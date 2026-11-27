@@ -5,7 +5,10 @@ process, so the CPU and RSS read through psutil are the collector's alone.
 
 Phases:
   idle    7 sessions x 20 children, static rows        budget: CPU < 2 percent of one core
-  active  7 sessions x 256 children, rows change       budget: CPU < 5 percent of one core
+  active      7 sessions x 20 children, every row changing each call (typical)
+              budget: CPU < 5 percent of one core
+  active-cap  7 sessions x 256 children, every row changing (the display cap, worst case)
+              budget: CPU < 5 percent of one core; part of the full variant only
   stress  busy-loop processes plus a source that hangs forever; the snapshot and views.json
           must keep updating, the hung source must read stale or down with its rows kept
 All phases: resident memory < 100 MB.
@@ -14,7 +17,7 @@ CONTENTION ALLOWANCE: under stress the CPU budget is 2x the idle budget (4 perce
 collector's own cpu_times() delta, not wall clock, so starvation does not inflate it, but cache
 and scheduler contention from the busy loops can raise the cost of the same work.
 
-Usage: python scripts/measure_overhead.py [--phase idle|active|stress|all] [--window S]
+Usage: python scripts/measure_overhead.py [--phase idle|active|active-cap|stress|all] [--window S]
        [--loops N]    (window up to 120 s, loops up to 8)
 Prints one JSON line per phase; appends a markdown table to $GITHUB_STEP_SUMMARY when set.
 Exit code 1 when a budget or continuity check fails.
@@ -51,6 +54,13 @@ MAX_WINDOW_S = 120.0
 MAX_LOOPS = 8
 HUNG_PID = 90001
 READY_TIMEOUT_S = 30.0
+
+PROFILES = {
+    "idle": "7 sessions x 20 children, static",
+    "active": "7 sessions x 20 children, changing",
+    "active-cap": "7 sessions x 256 children, changing",
+    "stress": "7 sessions x 20 children, static, hung source, busy loops",
+}
 
 _summary_header_done = False
 
@@ -220,7 +230,10 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
             kill_by_pid(b.pid, b)
         shutil.rmtree(workdir, ignore_errors=True)
 
-    limit = {"idle": IDLE_CPU_BUDGET, "active": ACTIVE_CPU_BUDGET, "stress": STRESS_CPU_BUDGET}[phase]
+    limit = {
+        "idle": IDLE_CPU_BUDGET, "active": ACTIVE_CPU_BUDGET, "active-cap": ACTIVE_CPU_BUDGET,
+        "stress": STRESS_CPU_BUDGET,
+    }[phase]
     gap_limit = MAX_GAP_FACTOR * TICK_S
     if cpu_pct >= limit:
         failures.append(f"cpu {cpu_pct:.2f} percent over budget {limit}")
@@ -237,7 +250,7 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
     if phase == "stress" and not stale_seen:
         failures.append("hung source never read stale or down")
     return {
-        "phase": phase, "cpu_percent": round(cpu_pct, 2), "rss_mb": round(rss_mb, 1),
+        "phase": phase, "profile": PROFILES[phase], "cpu_percent": round(cpu_pct, 2), "rss_mb": round(rss_mb, 1),
         "max_snapshot_gap_s": round(max_gap, 2), "max_views_gap_s": round(max_views_gap, 2),
         "stale_seen": stale_seen, "reads": reads, "parse_failures": parse_failures,
         "cpu_budget": limit, "window_s": window_s, "loops": loops,
@@ -255,11 +268,11 @@ def report(result: dict) -> None:
     with open(path, "a", encoding="utf-8") as fh:
         if not _summary_header_done:
             fh.write("\n### FAFO collector overhead\n\n")
-            fh.write("| phase | cpu % | budget % | rss MB | max snapshot gap s | stale seen "
-                     "| reads | parse failures |\n|---|---|---|---|---|---|---|---|\n")
+            fh.write("| phase | profile | cpu % | budget % | rss MB | max snapshot gap s | stale seen "
+                     "| reads | parse failures |\n|---|---|---|---|---|---|---|---|---|\n")
             _summary_header_done = True
         fh.write(
-            f"| {result['phase']} | {result['cpu_percent']} | {result['cpu_budget']} "
+            f"| {result['phase']} | {result['profile']} | {result['cpu_percent']} | {result['cpu_budget']} "
             f"| {result['rss_mb']} | {result['max_snapshot_gap_s']} | {result['stale_seen']} "
             f"| {result['reads']} | {result['parse_failures']} |\n"
         )
@@ -267,14 +280,14 @@ def report(result: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--phase", choices=("idle", "active", "stress", "all"), default="all")
+    ap.add_argument("--phase", choices=("idle", "active", "active-cap", "stress", "all"), default="all")
     ap.add_argument("--window", type=float, default=20.0)
     ap.add_argument("--loops", type=int, default=4)
     args = ap.parse_args(argv)
     if not 1.0 <= args.window <= MAX_WINDOW_S or not 1 <= args.loops <= MAX_LOOPS:
         ap.error(f"window must be 1..{MAX_WINDOW_S:g} s and loops 1..{MAX_LOOPS}")
     sys.path.insert(0, str(SRC))
-    phases = ("idle", "active", "stress") if args.phase == "all" else (args.phase,)
+    phases = ("idle", "active", "active-cap", "stress") if args.phase == "all" else (args.phase,)
     bad = 0
     for ph in phases:
         res = run_phase(ph, args.window, args.loops if ph == "stress" else 0)

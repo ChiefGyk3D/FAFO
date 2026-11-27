@@ -29,6 +29,16 @@ def test_active_within_budget():
 
 
 @pytest.mark.perf
+def test_active_cap_within_budget(perf_full):
+    """Worst case the display caps allow (7 x 256 changing rows); the full variant only."""
+    if not perf_full:
+        pytest.skip("full variant only: pytest tests/perf --perf-full or FAFO_PERF_FULL=1")
+    res = mo.run_phase("active-cap", FULL_WINDOW_S)
+    _check(res)
+    assert res["reads"] > 0
+
+
+@pytest.mark.perf
 def test_stress_display_never_blanks(perf_full):
     window, loops = (FULL_WINDOW_S, FULL_LOOPS) if perf_full else (WINDOW_S, DEFAULT_LOOPS)
     loops = min(loops, os.cpu_count() or 1, mo.MAX_LOOPS)
