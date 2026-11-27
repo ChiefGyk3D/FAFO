@@ -127,10 +127,35 @@ def _read_json(path: Path):
         return None, False
 
 
+def check_views_doc(vdoc, sessions_existed: bool) -> list[str]:
+    """Violations in the views.json document the display consumes (pure, no I/O).
+
+    Once sessions have existed the document must carry the schema and a numeric `generated`,
+    must not say no-collector, and must list sessions (or a positive session_index_count).
+    """
+    if not isinstance(vdoc, dict):
+        return ["views.json is not an object"]
+    bad = []
+    if not isinstance(vdoc.get("schema"), int):
+        bad.append("views.json schema missing")
+    gen = vdoc.get("generated")
+    if isinstance(gen, bool) or not isinstance(gen, (int, float)):
+        bad.append("views.json generated missing")
+    if sessions_existed:
+        if vdoc.get("status") not in ("ok", "stale"):
+            bad.append(f"views.json status {vdoc.get('status')!r} while sessions exist")
+        if not vdoc.get("sessions") and not vdoc.get("session_index_count"):
+            bad.append("views.json has no sessions while sessions exist")
+    return bad
+
+
 def _ready(snap, views_path: Path) -> bool:
-    """Steady state: agents rows present and views.json written (the hung source is not awaited:
-    a regression that blocks the writer must fail the gap check, not the start-up wait)."""
-    return snap is not None and views_path.exists() and bool(snap.sessions)
+    """Steady state: agents rows in the snapshot and in views.json (the hung source is not
+    awaited: a regression that blocks the writer must fail the gap check, not the start-up wait)."""
+    if snap is None or not snap.sessions:
+        return False
+    vdoc, ok = _read_json(views_path)
+    return bool(ok) and not check_views_doc(vdoc, True)
 
 
 def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
@@ -150,6 +175,8 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
     reads = parse_failures = 0
     stale_seen = False
     empty_views = 0
+    views_violations: list[str] = []
+    sessions_existed = False
     max_gap = max_views_gap = 0.0
     cpu_pct = rss_mb = 0.0
     try:
@@ -185,6 +212,7 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
                 if last_taken is None or snap.taken > last_taken:
                     max_gap = max(max_gap, now_m - last_taken_at)
                     last_taken, last_taken_at = snap.taken, now_m
+                sessions_existed = sessions_existed or bool(snap.sessions)
                 views = build_views(snap, time.time())
                 if views.status not in ("ok", "stale") or not views.sessions:
                     empty_views += 1
@@ -203,6 +231,7 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
             if vok is False:
                 parse_failures += 1
             elif vdoc is not None:
+                views_violations.extend(check_views_doc(vdoc, sessions_existed))
                 gen = vdoc.get("generated")
                 if last_gen is None or gen != last_gen:
                     max_views_gap = max(max_views_gap, now_m - last_gen_at)
@@ -241,6 +270,10 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
         failures.append(f"rss {rss_mb:.1f} MB over budget {RSS_BUDGET_MB}")
     if parse_failures:
         failures.append(f"{parse_failures} parse failures")
+    if views_violations:
+        failures.append(
+            f"{len(views_violations)} views.json violations, first: {views_violations[0]}"
+        )
     if empty_views:
         failures.append(f"{empty_views} reads gave an empty or no-collector view")
     if max_gap > gap_limit:
@@ -253,6 +286,7 @@ def run_phase(phase: str, window_s: float, loops: int = 0) -> dict:
         "phase": phase, "profile": PROFILES[phase], "cpu_percent": round(cpu_pct, 2), "rss_mb": round(rss_mb, 1),
         "max_snapshot_gap_s": round(max_gap, 2), "max_views_gap_s": round(max_views_gap, 2),
         "stale_seen": stale_seen, "reads": reads, "parse_failures": parse_failures,
+        "views_violations": len(views_violations),
         "cpu_budget": limit, "window_s": window_s, "loops": loops,
         "load_avg": [round(x, 1) for x in os.getloadavg()], "failures": failures,
     }

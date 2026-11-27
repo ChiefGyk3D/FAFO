@@ -110,3 +110,63 @@ def test_collector_uses_memo_for_source_rows(tmp_path):
     out = _scrub_result(res, cfg, col._memo)
     assert "hostx" not in out.procs[0].cmd and "AAA" in out.procs[0].cmd
     assert len(col._memo) > 0
+
+
+def _walk_strings(root, max_depth: int = 8, max_nodes: int = 200_000):
+    """Yield every str and bytes reachable from root (vars, containers), bounded."""
+    seen: set[int] = set()
+    stack = [(root, 0)]
+    nodes = 0
+    while stack:
+        obj, depth = stack.pop()
+        if id(obj) in seen or depth > max_depth:
+            continue
+        seen.add(id(obj))
+        nodes += 1
+        assert nodes <= max_nodes, "walk node cap hit"
+        if isinstance(obj, (str, bytes, bytearray)):
+            yield obj
+            continue
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                stack.append((k, depth + 1))
+                stack.append((v, depth + 1))
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend((v, depth + 1) for v in obj)
+        elif hasattr(obj, "__dict__"):
+            stack.append((vars(obj), depth + 1))
+        elif hasattr(obj, "__slots__"):
+            stack.extend((getattr(obj, n, None), depth + 1) for n in obj.__slots__)
+
+
+def test_memo_retains_no_raw_input_or_secret(tmp_path):
+    cfg = cfg_with({}, tmp_path)
+    memo = _Memo(cfg)
+    secrets = [f"SECRETVALUE{i:03d}xyz" for i in range(50)]
+    for i, sec in enumerate(secrets):
+        cmd = f"tool --token {sec} --user u{i} password={sec}"
+        memo.text(memo.cmd(cmd))  # the production path: mask first, then the text scrub
+    assert len(memo) > 0
+    blobs = list(_walk_strings(memo))
+    assert blobs  # the walk reached the cache contents
+    for sec in secrets:
+        needle = sec.encode()
+        for b in blobs:
+            hay = b.encode("utf-8", "surrogatepass") if isinstance(b, str) else bytes(b)
+            assert needle not in hay
+
+
+def test_instances_use_different_digest_keys(tmp_path):
+    cfg = cfg_with({}, tmp_path)
+    a, b = _Memo(cfg), _Memo(cfg)
+    assert a._digest("same input") != b._digest("same input")
+    assert a._digest("same input") == a._digest("same input")
+    assert len(a._digest("x")) == 32
+
+
+def test_bypassed_long_string_is_never_stored(tmp_path):
+    memo = _Memo(cfg_with({}, tmp_path))
+    long_secret = "LONGSECRET" + "q" * (MEMO_MAX_KEY_LEN + 5)
+    memo.cmd(long_secret)
+    memo.text(long_secret)
+    assert len(memo) == 0

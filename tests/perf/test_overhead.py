@@ -16,12 +16,14 @@ def _check(res: dict) -> None:
     assert not res["failures"], res["failures"]
 
 
+@pytest.mark.perf
 def test_idle_within_budget():
     res = mo.run_phase("idle", WINDOW_S)
     _check(res)
     assert res["reads"] > 0  # something was actually measured
 
 
+@pytest.mark.perf
 def test_active_within_budget():
     res = mo.run_phase("active", WINDOW_S)
     _check(res)
@@ -52,3 +54,18 @@ def test_stress_display_never_blanks(perf_full):
     assert res["max_snapshot_gap_s"] <= mo.MAX_GAP_FACTOR * mo.TICK_S, (
         f"snapshot gap {res['max_snapshot_gap_s']}s"
     )
+
+
+@pytest.mark.perf
+def test_views_doc_check_catches_a_valid_but_empty_document():
+    """No collector: a fake document that parses, says ok, and lists no sessions must fail."""
+    empty_ok = {"schema": 2, "generated": 1.0, "status": "ok", "sessions": [],
+                "session_index_count": 0}
+    assert mo.check_views_doc(empty_ok, sessions_existed=True)
+    assert mo.check_views_doc({**empty_ok, "status": "no-collector", "session_index_count": 3}, True)
+    assert mo.check_views_doc({"status": "ok", "sessions": [{"pid": 1}]}, True)  # no schema
+    good = {"schema": 2, "generated": 1.0, "status": "stale", "sessions": [{"pid": 1}]}
+    assert mo.check_views_doc(good, True) == []
+    assert mo.check_views_doc({**empty_ok, "session_index_count": 2}, True) == []
+    assert mo.check_views_doc(empty_ok, sessions_existed=False) == []  # nothing to blank yet
+    assert mo.check_views_doc(["x"], True)

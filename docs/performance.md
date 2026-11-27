@@ -22,18 +22,23 @@ Stress checks, on a read of the snapshot and `views.json` every 0.25 s for the w
 
 - the snapshot `taken` time and the `generated` time in `views.json` advance with no gap longer
   than 3 ticks (6 s);
-- every read parses (never a partial file);
+- every read parses (never a partial file), and the `views.json` document itself is checked:
+  schema present, status not `no-collector`, `sessions` (or a positive `session_index_count`)
+  non-empty while sessions exist;
 - the hung source reads `stale` or `down` and keeps its rows once it has been seen stale;
 - `build_views` never returns an empty tree or a `no-collector` status while sessions existed.
 
 ## Run it
 
-- Default (CI friendly, under 60 s for the file on an idle machine): `pytest tests/perf`. The idle and active phases
-  use a 10 s window. The stress phase uses a 10 s window and 4 loops.
-- Full variant (adds the active-cap phase; stress uses a 30 s window and 8 loops): `pytest tests/perf -m perf --perf-full`, or set
-  `FAFO_PERF_FULL=1`. The `--perf-full` option is registered by `tests/perf/conftest.py`, so it
-  is known only when `tests/perf` is part of the invocation; the environment variable works
-  anywhere.
+- Default run (CI friendly, under 60 s on an idle machine): `pytest tests/perf`. The idle and
+  active phases use a 10 s window, the stress phase a 10 s window and 4 loops. The active-cap
+  test is skipped.
+- Full run: `pytest tests/perf -m perf --perf-full`, or `FAFO_PERF_FULL=1 pytest tests/perf`.
+  Every test in the directory is marked `perf`, so `-m perf` selects them all (idle, active,
+  active-cap, stress, and the views.json check test); the full run adds the active-cap phase
+  (7x256, 30 s) and makes the stress phase use a 30 s window and 8 loops. `--perf-full` is
+  registered by `tests/perf/conftest.py`, so it is known only when `tests/perf` is part of the
+  invocation; the environment variable works anywhere.
 - Script with a longer window (up to 120 s, loops up to 8): `scripts/measure-overhead.sh
   --phase all --window 60 --loops 8`. It prints one JSON line per phase and exits 1 when a budget
   or continuity check fails. Set `FAFO_PYTHON` to an interpreter that has psutil.

@@ -8,7 +8,9 @@ Redaction is the sources' job, not this module's.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -66,24 +68,36 @@ def _init_field_names(cls: type) -> tuple[str, ...]:
 class _Memo:
     """Bounded LRU of string scrub results, one per Collector (the alias map lives in cfg).
 
-    The key is (kind, the exact input string), never a hash, so a collision cannot return
-    another string's result. Values are immutable str. Strings over MEMO_MAX_KEY_LEN bypass it.
-    Called from the per-source worker threads, so every access holds the lock.
+    No raw input is ever stored: a Proc.cmd arrives before redaction and can hold tokens and
+    passwords, and the memo lives as long as the collector. The key is (kind, a keyed BLAKE2b
+    digest of the input, 32 bytes, keyed with 32 random bytes from os.urandom per instance), and
+    the value is the already scrubbed output. This replaces the earlier rule of keying by the
+    exact string: with a 256-bit keyed cryptographic digest an accidental collision (which would
+    return another string's scrub) has negligible probability, about 2**-256 per pair, and the
+    random key means nobody can precompute a colliding input. Strings over MEMO_MAX_KEY_LEN
+    bypass the memo and are never stored. Values are immutable str. Called from the per-source
+    worker threads, so every access holds the lock.
     """
 
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._lock = threading.Lock()
-        self._data: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._hash_key = os.urandom(32)
+        self._data: OrderedDict[tuple[str, bytes], str] = OrderedDict()
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._data)
 
+    def _digest(self, s: str) -> bytes:
+        return hashlib.blake2b(
+            s.encode("utf-8", "surrogatepass"), digest_size=32, key=self._hash_key
+        ).digest()
+
     def _get(self, kind: str, s: str, compute: Callable[[str], str]) -> str:
         if len(s) > MEMO_MAX_KEY_LEN:
             return compute(s)
-        key = (kind, s)
+        key = (kind, self._digest(s))
         with self._lock:
             hit = self._data.get(key)
             if hit is not None:
