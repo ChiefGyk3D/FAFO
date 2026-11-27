@@ -285,3 +285,16 @@ def test_read_views_reads_file_and_missing_file(tmp_path: Path):
 def test_build_views_is_pure_and_deterministic():
     s = three_same_dir()
     assert build_views(s, NOW) == build_views(s, NOW)
+
+
+def test_last_known_project_gets_trailing_tilde_and_source():
+    last = sess(100, SID_A, "a", "chatty-kathy")
+    last.project_source = "last"
+    folder = sess(200, SID_B, "b", "src")
+    folder.project_source = "folder"
+    live = sess(300, SID_C, "c", "alpha")
+    v = build_views(snap(sessions=[last, folder, live]), NOW)
+    by = {n.name: n for n in v.sessions}
+    assert by["a"].project == "chatty-kathy~" and by["a"].project_source == "last"
+    assert by["b"].project == "src" and by["b"].project_source == "folder"
+    assert by["c"].project == "alpha" and by["c"].project_source == "live"

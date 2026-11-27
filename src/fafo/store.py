@@ -19,6 +19,7 @@ from .model import (
     LlmServer,
     LoadedModel,
     Proc,
+    ProjectSource,
     Runner,
     Session,
     Snapshot,
@@ -111,6 +112,11 @@ def _status(v):
         raise TypeError("bad status")
 
 
+def _project_source(v):
+    if type(v) is not str or v not in get_args(ProjectSource):
+        raise TypeError("bad project_source")
+
+
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
 _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
@@ -130,9 +136,9 @@ _SPEC = {
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
     "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
-    "rss": _int, "name": _str, "address": _str,
+    "rss": _int, "name": _str, "address": _str, "project_source": _project_source,
 }
-_SESSION_OPTIONAL = {"name": "", "address": ""}  # absent in older snapshots
+_SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live"}  # absent in older snapshots
 
 
 def _check(cls, data, spec):

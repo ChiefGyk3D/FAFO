@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import time
+from collections import OrderedDict
 from itertools import islice
 from pathlib import Path
 from typing import Any, Protocol
@@ -39,6 +40,8 @@ MAX_TASK = 80
 MAX_CWD = 200
 MAX_ID = 128
 STAT_CAP = 4096
+MAX_LAST_REPOS = 512  # remembered last repo names, one per session id
+LAST_REPO_TTL_S = 24 * 3600.0  # forget a session id this long after it was last seen
 _NAME_RE = re.compile(r"[0-9]{1,10}\.json")
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TICKS_RE = re.compile(r"[0-9]{1,20}")
@@ -213,6 +216,9 @@ class ClaudeSource:
         # Process objects live across cycles so cpu_percent has a previous call to measure from.
         self.cache = cache if cache is not None else ProcCache(psutil_mod)
         self._seen: set[tuple[int, float]] = set()
+        # session id -> (last repo name attributed through a child inside a repo, last seen time).
+        # Insertion order is last-seen order, so the front is the oldest.
+        self._last_repo: OrderedDict[str, tuple[str, float]] = OrderedDict()
 
     # -- registry ------------------------------------------------------------------------
     def _names(self, dir_fd: int) -> list[str]:
@@ -361,6 +367,25 @@ class ClaudeSource:
             return None
         return usage
 
+    # -- last-known repo --------------------------------------------------------------------
+    def _remember(self, sid: str, name: str, now: float) -> None:
+        self._last_repo[sid] = (name, now)
+        self._last_repo.move_to_end(sid)
+        while len(self._last_repo) > MAX_LAST_REPOS:
+            self._last_repo.popitem(last=False)
+
+    def _touch(self, sid: str, now: float) -> None:
+        held = self._last_repo.get(sid)
+        if held is not None:
+            self._remember(sid, held[0], now)
+
+    def _expire_last(self, now: float) -> None:
+        while self._last_repo:
+            oldest = next(iter(self._last_repo))
+            if now - self._last_repo[oldest][1] <= LAST_REPO_TTL_S:
+                break
+            del self._last_repo[oldest]
+
     # -- collect -------------------------------------------------------------------------
     def collect(self, ctx: Ctx) -> SourceResult:
         entries = self._live_entries(ctx)
@@ -377,6 +402,7 @@ class ClaudeSource:
             except Exception:  # noqa: BLE001 - any single bad entry is skipped
                 ctx.log.debug("claude: skipped an entry that failed")
         self.cache.end_cycle(self._seen)
+        self._expire_last(now)
         return result
 
     def _add(
@@ -394,11 +420,23 @@ class ClaudeSource:
         if self.git is not None:
             kw["git"] = self.git
         project, rule = attribute(cwd, child_cwds, **kw)
+        sid = e["sessionId"]
+        source = "live"
+        if rule == "children-git":
+            self._remember(sid, project, now)
+        else:
+            held = self._last_repo.get(sid)
+            if rule == "cwd-name":  # no repo attributed right now: only a folder name
+                if held is not None:
+                    project, source = held[0], "last"
+                else:
+                    source = "folder"
+            if held is not None:
+                self._touch(sid, now)
         status = e.get("status")
         state = status if type(status) is str and status in _STATES else "unknown"
         waiting = _label(e.get("waitingFor"), MAX_TASK)
         task = waiting or (state if state in _STATES else "")
-        sid = e["sessionId"]
         result.sessions.append(
             Session(
                 pid=pid,
@@ -415,6 +453,7 @@ class ClaudeSource:
                 rss=usage[1],
                 name=_label(e.get("name"), MAX_NAME),
                 address=sid,
+                project_source=source,
             )
         )
         result.procs.extend(row for row, _ in kids)

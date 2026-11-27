@@ -40,7 +40,7 @@ from pathlib import Path
 
 from ..model import Snapshot
 from ..store import ensure_private_dir
-from .view import Views, _s
+from .view import Views, _s, project_label
 
 SCHEMA_VERSION = 2
 MAX_INDEX = 2000
@@ -72,7 +72,10 @@ def build_session_index(views: Views, snapshot: Snapshot | None) -> tuple[list[d
     (the view model hides sessions past its display cap); else the sessions the view shows."""
     if snapshot is not None:
         rows = [
-            _index_entry(x.session_id, x.name, x.pid, x.project.value, x.state, x.address)
+            _index_entry(
+                x.session_id, x.name, x.pid, project_label(x.project.value, x.project_source),
+                x.state, x.address,
+            )
             for x in snapshot.sessions
             if x.agent == "claude" and x.pid != 0
         ]

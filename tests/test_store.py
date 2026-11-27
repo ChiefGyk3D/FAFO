@@ -327,3 +327,24 @@ def test_deeply_nested_values_are_rejected_not_crashed(tmp_path: Path):
     nest = "[" * 5000 + "1.5" + "]" * 5000
     path = _tampered(tmp_path, '"load":4.1', f'"load":{nest}')
     assert read_snapshot(path) is None
+
+
+def test_project_source_roundtrip_and_old_snapshot_defaults_live(tmp_path: Path):
+    path = tmp_path / "snap.json"
+    snap = make_snapshot()
+    snap.sessions[0].project_source = "last"
+    write_snapshot(path, snap)
+    got = read_snapshot(path)
+    assert got is not None and got.sessions[0].project_source == "last"
+    path2, doc = _doc(tmp_path)
+    doc["sessions"][0].pop("project_source", None)
+    path2.write_text(json.dumps(doc))
+    got = read_snapshot(path2)
+    assert got is not None and got.sessions[0].project_source == "live"
+
+
+def test_bad_project_source_rejected(tmp_path: Path):
+    path, doc = _doc(tmp_path)
+    doc["sessions"][0]["project_source"] = "bogus"
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
