@@ -22,6 +22,9 @@ dev = [
     "ruff==0.17.5",    # released 2026-11-12
 ]
 
+[project.scripts]
+fafo = "fafo.cli:main"
+
 [tool.setuptools.dynamic]
 version = { attr = "fafo.__version__" }
 

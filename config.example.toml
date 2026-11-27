@@ -1,6 +1,15 @@
 # FAFO example configuration. Copy and edit. Every value here is a placeholder.
-# Secrets (API or GitHub tokens, passwords, keys) never go in this file:
-# FAFO reads them from environment variables and rejects the file if it finds one.
+# Secrets (API or GitHub tokens, passwords, keys) never go in this file: FAFO reads them
+# from environment variables, and rejects the file if it finds a secret-looking key.
+# The only exceptions are token_env (the NAME of an environment variable) and key_path
+# (a file path; the file is never read by the config).
+#
+# Sources that need no options (host, claude, codex, gemini) are on by default.
+# ollama, runners and copilot are off until you add their table below.
+#
+# The blocks between the BEGIN and END marker lines are examples. A test removes the
+# leading "# " from them and checks that the result loads and builds, so they cannot rot.
+# Lines starting with "##" are explanations and stay comments.
 
 # Where the collector writes the snapshot. Default when unset:
 # ${XDG_RUNTIME_DIR:-~/.local/state}/fafo/snapshot.json
@@ -9,7 +18,8 @@
 # Command arguments shown in the process view. Everything else is shown as <arg>.
 show_args = ["exec", "resume", "--resume", "--model"]
 
-# One table per source: enabled, interval_s, timeout_s (positive numbers, seconds).
+# Every source table takes: enabled (true or false), interval_s and timeout_s
+# (positive numbers, seconds).
 [sources.host]
 enabled = true
 interval_s = 2
@@ -19,19 +29,69 @@ timeout_s = 5
 enabled = true
 interval_s = 2
 timeout_s = 5
+# Directory holding the Claude Code session registry. Default: ~/.claude/sessions
+# sessions_dir = "~/.claude/sessions"
 
-[sources.ollama]
-enabled = false
-interval_s = 5
-timeout_s = 3
+[sources.codex]
+enabled = true
 
-[sources.runners]
-enabled = false
-interval_s = 15
-timeout_s = 8
+[sources.gemini]
+enabled = true
+
+#@ BEGIN example
+## Local LLM server (Ollama). Off until this table exists. url is required.
+# [sources.ollama]
+# enabled = true
+# interval_s = 5
+# timeout_s = 3
+## Base URL of the server (http or https, no credentials, no query).
+# url = "http://ai-server.example.invalid:11434"
+## Optional: path of the admission log used to show queue depth and in-flight requests.
+# admission_log = "/var/log/example-admission.log"
+#@ END example
+
+#@ BEGIN example
+## CI runners. Off until this table exists. repos is required.
+# [sources.runners]
+# enabled = true
+# interval_s = 15
+# timeout_s = 8
+## Repositories whose Actions jobs are matched to runners (owner/name).
+# repos = ["owner/name"]
+## NAME of the environment variable that holds a read-only GitHub token (Actions: read).
+## The value is read from the environment at call time; it is never stored or printed.
+## Without it the runners source still works over ssh, without job details.
+# token_env = "FAFO_GITHUB_TOKEN"
+##
+## One table per runner host.
+# [[sources.runners.hosts]]
+## Runner name as GitHub reports it.
+# name = "runner-a"
+## ssh alias or host used for the read-only load, memory and disk checks. Optional.
+# ssh = "runner-a.example.invalid"
+## Path of the private key file to offer (never read by FAFO itself). Needs ssh. Optional.
+# key_path = "~/.ssh/id_example"
+## Optional: only match jobs from these repositories.
+# repos = ["owner/name"]
+#@ END example
+
+#@ BEGIN example
+## Copilot cloud agent runs. Off until this table exists. repos is required.
+# [sources.copilot]
+# enabled = true
+# interval_s = 30
+# timeout_s = 10
+## Repositories to look at (owner/name).
+# repos = ["owner/name"]
+## NAME of the environment variable that holds a read-only GitHub token.
+## If it is not set the source is skipped and doctor reports it as absent.
+# token_env = "FAFO_GITHUB_TOKEN"
+## Workflow paths you have verified as Copilot coding-agent sessions. Optional.
+# session_paths = ["dynamic/agents/example"]
+#@ END example
 
 # Hostnames and IPs are replaced by these aliases before anything is written.
 [aliases]
 "ai-server.example.invalid" = "ai-server"
-"runner-1.example.invalid" = "runner-1"
-"192.0.2.10" = "runner-2"
+"runner-a.example.invalid" = "runner-a"
+"192.0.2.10" = "runner-b"

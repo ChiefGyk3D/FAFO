@@ -16,8 +16,10 @@ def test_defaults_load_with_no_file(monkeypatch):
     cfg = load_config(None)
     assert isinstance(cfg, Config)
     assert {"host", "claude", "ollama", "runners"} <= set(cfg.sources)
+    # Intended change (task 34): only sources that need no options are on by default.
+    on = {n for n, s in cfg.sources.items() if s.enabled}
+    assert on == {"host", "claude", "codex", "gemini"}
     for s in cfg.sources.values():
-        assert s.enabled is True
         assert s.interval_s > 0 and s.timeout_s > 0
     assert cfg.aliases == {}
     assert "exec" in cfg.show_args
