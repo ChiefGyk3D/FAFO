@@ -69,7 +69,8 @@ budget, and its 4.5 percent leaves a thin margin on a loaded host.
 
 Redacting and sanitizing rows was the main cost of the cap profile (about 0.14 s of CPU per
 call). The collector memoizes the string scrub per instance (bounded LRU of 8192 entries keyed by
-kind and the exact string; strings over 2000 characters bypass it), which cut the cap figure from
+kind and a per-instance keyed BLAKE2b digest of the input, so no raw string is retained; strings
+over 2000 characters bypass it), which cut the cap figure from
 about 7.5 to about 4.5. The remaining cost is mostly the sanitizing in `build_views`, the
 dataclass walk and the JSON encoding of the snapshot.
 
