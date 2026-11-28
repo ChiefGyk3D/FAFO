@@ -386,25 +386,49 @@ def mask_credentials(text: str) -> str:
     if not isinstance(text, str):
         return ""
     head = text[: MAX_REDACTED_LEN * 4]
-    words = _visible(head).split()
-    cut_word = len(words) - 1 if len(text) > len(head) and words else -1
+    return _mask_readings(head, cut=len(text) > len(head))
+
+
+def _mask_readings(text: str, cut: bool) -> str:
+    """Mask both readings of `text` and keep the one that redacts more (ties keep the split one).
+
+    Split: controls and separators are word breaks. Glued: controls and format characters are
+    removed with no break, so a split token is one word again. Neither reading is trusted
+    alone: an invisible character can split a token (the split reading hides it) or glue a flag
+    to its value (the glued reading hides it), and the reader sees one of them.
+    """
+    stripped = _without_escapes(text)
+    split = _mask_words(_reading(stripped, glued=False).split(), cut)
+    glued = _mask_words(_reading(stripped, glued=True).split(), cut)
+    return glued if glued.count(MASK) > split.count(MASK) else split
+
+
+def _mask_words(words: list[str], cut: bool) -> str:
+    cut_word = len(words) - 1 if cut and words else -1
     out: list[str] = []
     mask_next = False
-    key_before = False  # the previous word names a secret ("password"), so "=" or ":" may follow
+    key_before = False  # the previous word names a secret ("password"); a separator may follow
+    prev = ""
     for index, raw in enumerate(words[: MAX_TOKENS * 16]):
         word = _normalize(raw)
         is_flag = word.startswith("-")
+        is_sep = word in ("=", ":")
+        key = word.rstrip("=:")
+        # After a secret key, a value that starts with a separator or a dash is a value, and so is
+        # a value joined to its key by a separator with any spacing ("password =x" as one pair).
+        after_key_value = key_before and word[:1] in ("=", ":", "-") and word not in ("=", ":")
+        pair_kv = bool(prev) and _CREDENTIAL_VALUE.search(f"{prev} {word}") is not None
         if (
             index == cut_word
             or (mask_next and not is_flag)
+            or after_key_value
+            or pair_kv
             or len(word) > MAX_TOKEN_LEN
             or _is_credential(word)
         ):
             out.append(MASK)
         else:
             out.append(word)
-        key = word.rstrip("=:")
-        is_sep = word in ("=", ":")
         # The word after a secret-named flag ("--token x", "-p x"), a header scheme, a secret
         # key with its separator ("token=", "password:") or a separator after a secret key
         # ("password = x", split by whitespace or controls) is a value.
@@ -415,33 +439,39 @@ def mask_credentials(text: str) -> str:
             or (is_sep and key_before)
         )
         key_before = not is_flag and not is_sep and key == word and _secret_name(word)
+        prev = word
     return " ".join(out)
 
 
-_BREAK_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp", "Zs")
-
-
-def _visible(text: str) -> str:
-    """The text a reader sees, for masking: escape sequences are removed (a terminal hides them),
-    then every control, format, separator and whitespace character becomes one space, so that
-    a control between a key and its value splits them instead of gluing them together."""
+def _without_escapes(text: str) -> str:
+    """Remove terminal escape sequences, which a terminal hides."""
     s = _ESC_STRING.sub("", text)
     s = _CSI.sub("", s)
-    s = _ESC_OTHER.sub("", s)
-    return "".join(
-        " " if ch.isspace() or unicodedata.category(ch) in _BREAK_CATEGORIES else ch for ch in s
-    )
+    return _ESC_OTHER.sub("", s)
+
+
+def _reading(s: str, glued: bool) -> str:
+    """One reading of already escape-free text. Real whitespace and separators (Zs, Zl, Zp)
+    are word breaks in both readings. Controls, format and surrogate characters are breaks in
+    the split reading and removed with no break in the glued reading."""
+    out: list[str] = []
+    for ch in s:
+        cat = unicodedata.category(ch)
+        if ch.isspace() or cat in ("Zs", "Zl", "Zp"):
+            out.append(" ")
+        elif cat in ("Cc", "Cf", "Cs"):
+            if not glued:
+                out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def masked_text(text: str, cap: int, bound: int = 64 * 1024) -> str:
-    """Normalize, then mask credentials, then cut to `cap`.
+    """Mask credentials, then cut to `cap`, over both readings of the input up to `bound`.
 
-    Controls, format characters and separators become single-space word breaks first, over
-    the input up to `bound` characters (the size of a job file), and runs collapse. So a
-    control between a key and its value splits them, never glues them, and a cut never lands
-    before the breaks. Then the words are masked, then any leftover control is stripped, then
-    the result is cut to `cap`. Callers that display text cut by `cap` should use this, not
-    sanitize_text after mask_credentials on a pre-cut string.
+    The bound is the size of a job file. Input past it is ignored, and a word that the bound cuts
+    is masked whole (see mask_credentials). Callers that display text cut by `cap` should use this,
+    not sanitize_text after mask_credentials on a pre-cut string: the cut would come first.
     """
-    flat = " ".join(_visible(text[:bound]).split())  # controls become word breaks, runs collapse
-    return sanitize_text(mask_credentials(flat), cap)  # mask, then strip leftovers, then cut
+    return sanitize_text(_mask_readings(text[:bound], cut=len(text) > bound), cap)
