@@ -110,6 +110,25 @@ def test_golden():
     assert line(busy_mix()) + "\n" == GOLDEN.read_text(encoding="utf-8")
 
 
+def llm_qi(queue, inflight, models=2):
+    return LlmServer(
+        models=[LoadedModel(f"m{i}", 1, 1, NOW + 60) for i in range(models)], queue=queue,
+        inflight=[Inflight("m0", None, NOW) for _ in range(inflight)], gpu={},
+    )
+
+
+def test_ollama_busy_is_queue_plus_inflight():
+    # the table and the TUI show queue and in-flight as separate counts: they add up
+    assert line(snap(llms=[llm_qi(2, 1)])) == "ol 3/2"
+    assert line(snap(llms=[llm_qi(2, 0)])) == "ol 2/2"
+    assert line(snap(llms=[llm_qi(0, 1), llm_qi(1, 1)])) == "ol 3/4"
+
+
+def test_ollama_busy_display_capped():
+    assert line(snap(llms=[llm_qi(98, 5)])) == "ol 99+/2"
+    assert line(snap(llms=[llm_qi(60, 39)])) == "ol 99/2"
+
+
 def test_active_cpu_threshold_is_inclusive():
     s = snap(procs=[proc(1, "codex", ACTIVE_CPU), proc(2, "codex", ACTIVE_CPU - 0.01)])
     assert line(s) == "cx 1/2"

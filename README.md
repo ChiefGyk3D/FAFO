@@ -139,9 +139,12 @@ intermediate process, no record matches and no session row appears.
 reads the snapshot once, with no network and no subprocess. Segments, in this order, each shown
 only while something is busy: `cl 2/5` (Claude sessions busy of total), `cx 1/3` (Codex
 processes using at least 1% CPU, of all Codex processes), `ol 1/2` (Ollama busy requests of
-loaded models), `gm 1` (Gemini processes using at least 1% CPU), `rn 1/4` (runners busy of
-total), `cp 1` (Copilot cloud runs running). A source whose last poll failed shows a trailing
-`!` (`ol!`), even when idle. When everything is idle the line is empty (just a newline).
+loaded models; queued plus in-flight requests, shown as `99+` above 99), `gm 1` (Gemini processes using at least 1% CPU), `rn 1/4` (runners busy of
+total), `cp 1` (Copilot cloud runs running). A source that is down (its health status is
+`down`, an Ollama server is unreachable, or a runner is down) gets a trailing `!` (`ol!`), even
+when idle. A stale source (for example a collector timeout) gets no `!`: with `--color` it is
+dimmed while busy, and it is omitted while idle. When everything is idle the line is empty
+(just a newline).
 
 Options: `--width N`, `--color`, `--quiet`, `--stale-after SECONDS` (and `--snapshot`, `--config`).
 

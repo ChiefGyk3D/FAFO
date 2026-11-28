@@ -21,6 +21,7 @@ from ..redact import sanitize_text
 ACTIVE_CPU = 1.0  # percent: a Codex or Gemini process at or above this counts as active
 MAX_FUTURE_S = 60.0  # a snapshot stamped further ahead than this is not trusted
 MAX_SEGMENT = 24
+MAX_COUNT = 99  # Ollama busy count shown as 99+ above this
 NO_COLLECTOR_MARK = "fafo: no collector"
 ELLIPSIS = "..."
 SEP = " "
@@ -32,6 +33,10 @@ _SOURCE = {"cl": "claude", "cx": "codex", "ol": "ollama", "gm": "gemini", "rn": 
 
 def _cpu_active(cpu: object) -> bool:
     return isinstance(cpu, (int, float)) and math.isfinite(cpu) and cpu >= ACTIVE_CPU
+
+
+def _capped(n: int) -> str:
+    return str(n) if n <= MAX_COUNT else f"{MAX_COUNT}+"
 
 
 def _segments(snap: Snapshot) -> list[tuple[str, str]]:
@@ -46,7 +51,8 @@ def _segments(snap: Snapshot) -> list[tuple[str, str]]:
     cl_busy = sum(1 for s in claude if s.state == "busy")
     codex = [p for p in snap.procs if p.agent == "codex"]
     cx_busy = sum(1 for p in codex if _cpu_active(p.cpu))
-    ol_busy = sum(max(s.queue, len(s.inflight)) for s in snap.llms)
+    # queued and admitted requests are separate work (the table shows both counts): they add
+    ol_busy = sum(s.queue + len(s.inflight) for s in snap.llms)
     ol_models = sum(len(s.models) for s in snap.llms)
     ol_down = any(not s.reachable for s in snap.llms)
     gm_busy = sum(1 for p in snap.procs if p.agent == "gemini" and _cpu_active(p.cpu))
@@ -57,7 +63,7 @@ def _segments(snap: Snapshot) -> list[tuple[str, str]]:
     rows = [
         ("cl", cl_busy, f"{cl_busy}/{len(claude)}", False),
         ("cx", cx_busy, f"{cx_busy}/{len(codex)}", False),
-        ("ol", ol_busy, f"{ol_busy}/{ol_models}", ol_down),
+        ("ol", ol_busy, f"{_capped(ol_busy)}/{ol_models}", ol_down),
         ("gm", gm_busy, f"{gm_busy}", False),
         ("rn", rn_busy, f"{rn_busy}/{len(snap.runners)}", rn_down),
         ("cp", cp_busy, f"{cp_busy}", False),
