@@ -171,3 +171,51 @@ def test_config_option(tmp_path: Path, lit, ok):
     else:
         with pytest.raises(ConfigError):
             load_config(f)
+
+
+def test_source_realistic_epoch_start_is_classified():
+    clock = Clock()
+    p = CpuProc(10, 1, ["codex", "exec", "x"], user=1.0, started=1_795_000_000.0)
+    src = CodexSource(lister=lambda: [p], tracker=ActivityTracker(clock=clock))
+    assert src.collect(ctx()).procs[0].activity == "unknown"
+    clock.t += 2.0
+    p.t = (1.5, 0.0)
+    assert src.collect(ctx()).procs[0].activity == "active"
+    for _ in range(4):
+        clock.t += 2.0
+        last = src.collect(ctx()).procs[0].activity
+    assert last == "idle"
+
+
+@pytest.mark.parametrize("started", [-1.0, 1e12, float("nan")])
+def test_source_out_of_range_start_is_unknown(started):
+    clock = Clock()
+    p = CpuProc(10, 1, ["codex", "exec", "x"], user=1.0, started=started)
+    src = CodexSource(lister=lambda: [p], tracker=ActivityTracker(clock=clock))
+    src.collect(ctx())
+    clock.t += 2.0
+    p.t = (1.5, 0.0)
+    assert src.collect(ctx()).procs[0].activity == "unknown"
+
+
+def test_source_huge_cpu_times_are_unknown_and_never_raise():
+    class Huge(CpuProc):
+        def cpu_times(self):
+            return Times(10**400, -(10**400))
+
+    src = CodexSource(lister=lambda: [Huge(10, 1, ["codex", "exec", "x"])])
+    assert src.collect(ctx()).procs[0].activity == "unknown"
+
+
+BIG = "1" + "0" * 400
+
+
+@pytest.mark.parametrize("lit", [BIG, "-" + BIG, "true", "nan", "inf", "-inf", "1e400", "100.1",
+                                 "0.49"])
+def test_config_out_of_range_is_config_error_without_echo(tmp_path: Path, lit):
+    f = tmp_path / "c.toml"
+    f.write_text(f"[sources.codex]\nactive_cpu_pct = {lit}\n")
+    with pytest.raises(ConfigError) as info:
+        load_config(f)
+    msg = str(info.value)
+    assert lit not in msg and "0" * 20 not in msg

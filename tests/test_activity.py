@@ -150,3 +150,81 @@ def test_clean_activity_and_counts():
         assert clean_activity(bad) == "unknown"
     # known words win over the fallback; unknown uses the fallback flag
     assert counts(["active", "idle", "unknown", "unknown"], [False, True, True, False]) == (2, 4)
+
+
+REAL_START = 1_795_000_000.0  # a psutil create_time: epoch seconds in late 2026
+SMALL_START = 10.0  # a start the current code accepts, so these tests isolate their own check
+HOSTILE = [10**400, -(10**400), True, False, "1", None, float("nan"), float("inf"), float("-inf")]
+
+
+def test_realistic_epoch_start_is_classified():
+    t, c = mk()
+    assert t.observe(5, REAL_START, 1.0) == "unknown"
+    c.t += 2.0
+    assert t.observe(5, REAL_START, 1.5) == "active"
+    for _ in range(4):  # the window drains the busy period
+        c.t += 2.0
+        last = t.observe(5, REAL_START, 1.5)
+    assert last == "idle"
+
+
+@pytest.mark.parametrize("start", [0.0, 4_000_000_000.0])
+def test_start_time_bounds_are_inclusive(start):
+    t, c = mk()
+    t.observe(5, start, 1.0)
+    c.t += 2.0
+    assert t.observe(5, start, 1.5) == "active"
+
+
+@pytest.mark.parametrize(
+    "start", [-1.0, -(10**400), 4_000_000_001.0, 1e12, 10**400, float("nan"), float("inf"),
+              True, "1795000000", None],
+)
+def test_start_time_out_of_range_is_unknown(start):
+    t, c = mk()
+    assert t.observe(5, start, 1.0) == "unknown"
+    c.t += 2.0
+    assert t.observe(5, start, 1.5) == "unknown"
+    assert len(t) == 0
+
+
+@pytest.mark.parametrize("bad", HOSTILE)
+def test_observe_cpu_time_hostile_never_raises(bad):
+    t, c = mk()
+    t.observe(5, SMALL_START, 1.0)
+    c.t += 2.0
+    assert t.observe(5, SMALL_START, bad) == "unknown"
+
+
+@pytest.mark.parametrize("bad", HOSTILE)
+def test_observe_start_time_hostile_never_raises(bad):
+    t, _ = mk()
+    assert t.observe(5, bad, 1.0) == "unknown"
+    assert len(t) == 0
+
+
+@pytest.mark.parametrize("bad", HOSTILE)
+def test_observe_clock_hostile_never_raises(bad):
+    t, c = mk()
+    t.observe(5, SMALL_START, 1.0)  # clock at 1000
+    c.t = bad
+    assert t.observe(5, SMALL_START, 2.0) == "unknown"
+
+
+def test_bool_clock_is_not_read_as_one_second():
+    t, c = mk()
+    c.t = 0.5
+    t.observe(5, SMALL_START, 1.0)
+    c.t = True  # if read as 1.0 this would be a 200 percent rise over a 0.5 s span
+    assert t.observe(5, SMALL_START, 2.0) == "unknown"
+
+
+@pytest.mark.parametrize("bad", [10**400, -(10**400), True, False, float("nan"), float("inf"),
+                                 float("-inf"), 0, 0.49, 100.1, "1", None])
+def test_valid_pct_rejects_huge_ints_and_hostile_values(bad):
+    assert valid_pct(bad) is False
+
+
+def test_valid_pct_accepts_the_range_ends():
+    assert valid_pct(0.5) is True
+    assert valid_pct(100) is True

@@ -30,15 +30,24 @@ MIN_ACTIVE_PCT = 0.5
 MAX_ACTIVE_PCT = 100.0
 MIN_SPAN_S = 0.5
 MAX_CPU_TIME_S = 1e9  # about 31 years of CPU time; anything above is not a real reading
+MAX_EPOCH_S = 4e9  # epoch seconds (year 2096): the bound for process start times and the clock
 
 Key = tuple[int, float]
 
 
+def _in_range(value: object, low: float, high: float) -> bool:
+    """True for an int or a float (never bool) from low to high inclusive. An int is compared as
+    an int, so a huge one is never converted to float and cannot overflow; NaN and inf fail."""
+    if type(value) is int:
+        return low <= value <= high
+    if type(value) is float:
+        return math.isfinite(value) and low <= value <= high
+    return False
+
+
 def valid_pct(value: object) -> bool:
     """True for a real number (not bool) from MIN_ACTIVE_PCT to MAX_ACTIVE_PCT."""
-    if type(value) not in (int, float):
-        return False
-    return math.isfinite(value) and MIN_ACTIVE_PCT <= value <= MAX_ACTIVE_PCT
+    return _in_range(value, MIN_ACTIVE_PCT, MAX_ACTIVE_PCT)
 
 
 def clean_activity(value: object) -> str:
@@ -46,12 +55,13 @@ def clean_activity(value: object) -> str:
     return value if type(value) is str and value in ACTIVITIES else "unknown"
 
 
-def _good_time(value: object) -> bool:
-    return (
-        type(value) in (int, float)
-        and math.isfinite(value)
-        and 0.0 <= value <= MAX_CPU_TIME_S
-    )
+def _good_cpu_time(value: object) -> bool:
+    return _in_range(value, 0.0, MAX_CPU_TIME_S)
+
+
+def _good_start(value: object) -> bool:
+    """A process start time is epoch seconds (psutil create_time), not CPU seconds."""
+    return _in_range(value, 0.0, MAX_EPOCH_S)
 
 
 class ActivityTracker:
@@ -89,18 +99,19 @@ class ActivityTracker:
 
     def observe(self, pid: object, create_time: object, cpu_time: object) -> Activity:
         """Record one reading of cumulative CPU seconds and return the classification."""
-        if type(pid) is not int or not _good_time(create_time):
+        if type(pid) is not int or not _good_start(create_time):
             return "unknown"
         try:
-            now = float(self._clock())
+            raw_now = self._clock()
         except Exception:  # noqa: BLE001 - a broken injected clock must not break a cycle
             return "unknown"
-        if not math.isfinite(now):
+        if not _in_range(raw_now, 0.0, MAX_EPOCH_S):
             return "unknown"
+        now = float(raw_now)
         key: Key = (pid, float(create_time))  # type: ignore[arg-type]
         with self._lock:
             self._purge(now)
-            if not _good_time(cpu_time):
+            if not _good_cpu_time(cpu_time):
                 self._items.pop(key, None)  # an untrusted reading ends the series
                 return "unknown"
             cpu = float(cpu_time)  # type: ignore[arg-type]
