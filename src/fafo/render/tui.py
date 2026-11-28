@@ -389,24 +389,31 @@ def _wrap(text: str, width: int) -> list[str]:
 
 
 def build_llm_page(views: Views, needle: str) -> Page:
-    llm = views.llm
-    if llm is None:
+    if not views.llms:
         return Page([], [], None, "local LLM: not reported")
     items: list[Item] = []
-    c = "stale" if llm.stale else "head"
-    summary = f"queue {llm.queue}   in-flight {len(llm.inflight)}   gpu {llm.gpu or '?'}"
-    items.append(Item("line", ("l", "summary"), summary, c))
-    for m in llm.models:
-        if needle and needle not in m.name.lower():
-            continue
-        items.append(Item("model", ("model", m.name), m, llm.stale))
-    if llm.models_hidden:
-        items.append(Item("more", ("m", "models"), f"+{llm.models_hidden} more models not shown"))
-    for i, f in enumerate(llm.inflight):
-        if needle and needle not in f.model.lower() and needle not in f.session.lower():
-            continue
-        items.append(Item("line", ("l", "inflight", i), f"  in-flight: {f.model}  <-  {f.session}",
-                          "stale" if llm.stale else "fg"))
+    for n, llm in enumerate(views.llms):
+        c = "stale" if llm.stale else "head"
+        if llm.label:
+            note = f"   (last good {llm.age} ago)" if llm.stale else ""
+            items.append(Item("line", ("l", n, "server"), f"server {llm.name}{note}", c))
+        summary = f"queue {llm.queue}   in-flight {len(llm.inflight)}   gpu {llm.gpu or '?'}"
+        items.append(Item("line", ("l", n, "summary"), summary, c))
+        for m in llm.models:
+            if needle and needle not in m.name.lower():
+                continue
+            items.append(Item("model", ("model", n, m.name), m, llm.stale))
+        if llm.models_hidden:
+            items.append(Item("more", ("m", n, "models"),
+                              f"+{llm.models_hidden} more models not shown"))
+        for i, f in enumerate(llm.inflight):
+            if needle and needle not in f.model.lower() and needle not in f.session.lower():
+                continue
+            items.append(Item("line", ("l", n, "inflight", i),
+                              f"  in-flight: {f.model}  <-  {f.session}",
+                              "stale" if llm.stale else "fg"))
+    if views.llms_hidden:
+        items.append(Item("more", ("m", "servers"), f"+{views.llms_hidden} more servers not shown"))
 
     def cells(it: Item) -> tuple[str, dict[str, Cell], bool]:
         m = it.a

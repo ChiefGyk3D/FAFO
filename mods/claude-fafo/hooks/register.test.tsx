@@ -242,6 +242,46 @@ test('stale rows are dimmed and carry an age tag', async ($, on) => {
   await ui.unmount()
 })
 
+const llmOf = (name: string, model: string, over: Record<string, unknown> = {}) => ({
+  name,
+  label: true,
+  age: '1s',
+  models: [{ name: model, vram: '4G', context: '8k', expires: '4m' }],
+  queue: 2,
+  inflight: [],
+  gpu: '',
+  stale: false,
+  ...over,
+})
+
+test('every LLM server is drawn with its own name, models and stale dimming', async ($, on) => {
+  const a = llmOf('gpu-box', 'model-a')
+  const b = llmOf('laptop', 'model-b', { stale: true, age: '2m' })
+  await load($, on, views({ llm: a, llms: [a, b] }))
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  expect(all.some(t => /^LLM gpu-box .*queue 2/.test(t))).toBe(true)
+  expect(all.some(t => /model-a/.test(t))).toBe(true)
+  const head = await ui.find({ type: 'Text', text: /^LLM laptop/ })
+  expect(head?.text).toContain('last good 2m')
+  expect(head?.props.dimColor).toBe(true)
+  const fresh = await ui.find({ type: 'Text', text: /^LLM gpu-box/ })
+  expect(fresh?.props.dimColor).toBe(false)
+  expect(all.some(t => /model-b/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('a file with only the old llm field still shows one LLM block', async ($, on) => {
+  const doc = views() as Record<string, unknown>
+  delete doc.llms
+  await load($, on, doc)
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  expect(all.filter(t => t.startsWith('LLM')).length).toBe(1)
+  expect(all.some(t => /model-a/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
 test('a read error keeps the last good views with an age tag', async ($, on) => {
   const { ctl, clock } = await load($, on, views({ sessions: [node(1, OWN_NODE)] }))
   ctl.file.value = new Error('ENOENT: no such file')
@@ -288,6 +328,7 @@ test('malformed rows are ignored without throwing', async ($, on) => {
     health: 'bad',
     unattached: [{ name: 5, procs: [null], sessions: 'x' }],
     llm: 'bad',
+    llms: [1, null, 'x'],
     runners: [1, null],
     quota: [[], { name: 3 }],
   })

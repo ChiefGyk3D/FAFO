@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 from .config import Config, SourceCfg
-from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
+from .model import MAX_LLM_SERVERS, SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
 from .redact import mask_credentials, sanitize_text
 from .render.export import write_views
 from .render.view import build_views, policy_from_config
@@ -281,10 +281,10 @@ class Collector:
             snap.sessions.extend(res.sessions)
             snap.procs.extend(res.procs)
             snap.runners.extend(res.runners)
-            if snap.llm is None and res.llm is not None:
-                snap.llm = res.llm
+            snap.llms.extend(res.llms or ([res.llm] if res.llm is not None else []))
             snap.host.update(res.host)
             snap.quota.update(res.quota)
+        del snap.llms[MAX_LLM_SERVERS:]
         return snap
 
     def run(self) -> None:

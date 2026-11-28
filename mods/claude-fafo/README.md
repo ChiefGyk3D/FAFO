@@ -42,7 +42,7 @@ This matches the collector's default. If you pointed the collector somewhere els
   exactly `unknown session`, or `unknown session (index truncated, N hidden)` when the file says its session index was cut.
 - A health line (per source status and age), then host load.
 - Sessions, the current one first and marked `>`, each with its commands indented under it,
-  then unattached groups, then LLM, runners and quota when there is room. Stale rows are
+  then unattached groups, then LLM (one block per server, labeled with its name when there are several; a server that stopped answering is dimmed with its last good age), runners and quota when there is room. Stale rows are
   dimmed with an age tag.
 - Columns are dropped by priority as the pane narrows, text is cut with an ellipsis, and a
   `+N more` line shows rows that do not fit. Nothing is wider than the pane.

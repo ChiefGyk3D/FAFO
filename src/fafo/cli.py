@@ -108,7 +108,7 @@ def _summary(res: SourceResult) -> str:
         ("sessions", len(res.sessions)),
         ("procs", len(res.procs)),
         ("runners", len(res.runners)),
-        ("llm", 1 if res.llm is not None else 0),
+        ("llm", len(res.llms) or (1 if res.llm is not None else 0)),
     ):
         if n:
             parts.append(f"{label}={n}")

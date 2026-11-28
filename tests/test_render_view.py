@@ -58,7 +58,7 @@ def snap(sessions=(), procs=(), taken=NOW, **kw):
         host=kw.get("host", {"load1": 4.1, "cpu_percent": 20.0, "mem_percent": 61.0}),
         sessions=list(sessions),
         procs=list(procs),
-        llm=kw.get("llm"),
+        llms=[kw["llm"]] if kw.get("llm") else list(kw.get("llms", [])),
         runners=kw.get("runners", []),
         quota=kw.get("quota", {}),
         health=kw.get("health", []),
@@ -285,6 +285,47 @@ def test_read_views_reads_file_and_missing_file(tmp_path: Path):
 def test_build_views_is_pure_and_deterministic():
     s = three_same_dir()
     assert build_views(s, NOW) == build_views(s, NOW)
+
+
+def server(name, model, *, last_ok=NOW - 1, reachable=True, queue=0, inflight=()):
+    return LlmServer(
+        models=[LoadedModel(model, 8 * 1024**3, 8000, NOW + 240)],
+        queue=queue, inflight=list(inflight), gpu={}, name=name, last_ok=last_ok,
+        reachable=reachable,
+    )
+
+
+def test_two_servers_both_in_view_labeled_and_llm_is_the_first():
+    a = server("alpha", "m-a", queue=2, inflight=[Inflight("m-a", None, NOW - 5)])
+    b = server("beta", "m-b", queue=1)
+    v = build_views(snap(llms=[a, b]), NOW)
+    assert [(s.name, s.models[0].name, s.queue, len(s.inflight)) for s in v.llms] == [
+        ("alpha", "m-a", 2, 1), ("beta", "m-b", 1, 0)]
+    assert v.llm is v.llms[0]
+
+
+def test_per_server_staleness_by_reachability_and_age():
+    a = server("alpha", "m-a")
+    dead = server("beta", "m-b", last_ok=NOW - 90, reachable=False)
+    old = server("gamma", "m-c", last_ok=NOW - 90)  # collector kept it: reachable but aged
+    v = build_views(snap(llms=[a, dead, old]), NOW)
+    assert [s.stale for s in v.llms] == [False, True, True]
+    assert v.llms[1].age == "1m" and v.llms[0].age == "1s"
+    never = build_views(snap(llms=[server("n", "m", last_ok=0.0, reachable=False)]), NOW)
+    assert never.llms[0].stale and never.llms[0].age == "?"
+
+
+def test_server_cap_in_view():
+    many = [server(f"s{i}", "m") for i in range(12)]
+    v = build_views(snap(llms=many), NOW)
+    assert len(v.llms) == 8 and v.llms_hidden == 4
+
+
+def test_single_default_server_is_unlabeled_and_other_name_is_labeled():
+    assert build_views(snap(llms=[server("ollama", "m")]), NOW).llms[0].label is False
+    assert build_views(snap(llms=[server("gpu-box", "m")]), NOW).llms[0].label is True
+    two = build_views(snap(llms=[server("ollama", "m"), server("b", "m")]), NOW)
+    assert all(s.label for s in two.llms)
 
 
 def test_last_known_project_gets_trailing_tilde_and_source():

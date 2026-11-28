@@ -393,3 +393,86 @@ def test_token_file_wrong_type_rejected(tmp_path):
 def test_token_file_only_allowed_at_the_exact_locations(tmp_path, body):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, body))
+
+
+OLLAMA_TWO = """
+[sources.ollama]
+interval_s = 5
+
+[[sources.ollama.servers]]
+name = "gpu-box"
+url = "http://gpu.example.invalid:11434"
+admission_log = "/var/log/example-admission.log"
+
+[[sources.ollama.servers]]
+name = "laptop.local"
+url = "https://laptop.example.invalid:11434"
+"""
+
+
+def test_ollama_servers_list_parses(tmp_path):
+    o = load_config(write(tmp_path, OLLAMA_TWO)).sources["ollama"].options
+    assert [s["name"] for s in o["servers"]] == ["gpu-box", "laptop.local"]
+    assert o["servers"][0]["admission_log"] == "/var/log/example-admission.log"
+    assert o["servers"][1]["url"] == "https://laptop.example.invalid:11434"
+
+
+def test_ollama_old_single_url_still_loads(tmp_path):
+    o = load_config(write(tmp_path, SAMPLE)).sources["ollama"].options
+    assert o["url"] == "http://ollama.example.invalid:11434" and "servers" not in o
+
+
+def many(n):
+    return "[sources.ollama]\n" + "".join(
+        f'[[sources.ollama.servers]]\nname = "s{i}"\nurl = "http://s{i}.example.invalid"\n'
+        for i in range(n)
+    )
+
+
+def test_ollama_eight_servers_ok_nine_refused(tmp_path):
+    assert len(load_config(write(tmp_path, many(8))).sources["ollama"].options["servers"]) == 8
+    assert "sources.ollama.servers" in err(tmp_path, many(9))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            '[[sources.ollama.servers]]\nname = "a"\nurl = "http://x.invalid"\n'
+            '[[sources.ollama.servers]]\nname = "a"\nurl = "http://y.invalid"\n'
+        ),
+        (
+            '[[sources.ollama.servers]]\nname = "A"\nurl = "http://x.invalid"\n'
+            '[[sources.ollama.servers]]\nname = "a"\nurl = "http://y.invalid"\n'
+        ),
+        '[[sources.ollama.servers]]\nname = "bad name"\nurl = "http://x.invalid"\n',
+        '[[sources.ollama.servers]]\nname = "' + "n" * 33 + '"\nurl = "http://x.invalid"\n',
+        '[[sources.ollama.servers]]\nname = ""\nurl = "http://x.invalid"\n',
+        '[[sources.ollama.servers]]\nurl = "http://x.invalid"\n',
+        '[[sources.ollama.servers]]\nname = "a"\n',
+        '[[sources.ollama.servers]]\nname = "a"\nurl = "http://x.invalid"\nextra = 1\n',
+        '[[sources.ollama.servers]]\nname = "a"\nurl = 5\n',
+        'admission_log = "/var/log/x.log"\n[[sources.ollama.servers]]\nname = "a"\nurl = "http://x.invalid"\n',
+        'url = "http://z.invalid"\n[[sources.ollama.servers]]\nname = "a"\nurl = "http://x.invalid"\n',
+    ],
+)
+def test_ollama_servers_bad_forms_name_the_option(tmp_path, body):
+    assert "sources.ollama" in err(tmp_path, "[sources.ollama]\n" + body)
+
+
+def test_example_servers_block_loads_and_builds(tmp_path):
+    from fafo.registry import build_sources
+
+    out, inside = [], False
+    for line in EXAMPLE.read_text(encoding="utf-8").splitlines():
+        if line == "#@ BEGIN example-servers":
+            inside = True
+        elif line == "#@ END example-servers":
+            inside = False
+        elif inside and line.startswith("# "):
+            out.append(line[2:])
+    assert out  # something was collected
+    cfg = load_config(write(tmp_path, "\n".join(out) + "\n"))
+    assert [s["name"] for s in cfg.sources["ollama"].options["servers"]] == ["gpu-box", "laptop"]
+    src = {s.name: s for s in build_sources(cfg, {})}["ollama"]
+    assert [s.name for s in src.servers] == ["gpu-box", "laptop"]

@@ -55,7 +55,7 @@ def snap(sessions=(), procs=(), taken=None, **kw):
         version=SNAPSHOT_VERSION,
         taken=time.time() if taken is None else taken,
         host={"load1": 4.1, "cpu_percent": 20.0, "mem_percent": 61.0},
-        sessions=list(sessions), procs=list(procs), llm=kw.get("llm"),
+        sessions=list(sessions), procs=list(procs), llms=[kw["llm"]] if kw.get("llm") else list(kw.get("llms", [])),
         runners=kw.get("runners", []), quota=kw.get("quota", {}),
         health=kw.get("health", [SourceHealth("claude", "ok", time.time() - 3, "")]),
     )
@@ -538,10 +538,10 @@ def test_too_small_shows_message_and_does_not_crash(snap_path):
 def test_renders_at_widths_without_overflow(snap_path, size):
     w, h = size
     s = three()
-    s.llm = LlmServer(
+    s.llms = [LlmServer(
         models=[LoadedModel("gemma-example:12b", 8 * 2**30, 128000, time.time() + 240)],
         queue=1, inflight=[Inflight("gemma-example:12b", 100, time.time() - 5)], gpu={"util": 78.0},
-    )
+    )]
     s.runners = [Runner("r1", "busy", "owner/repo", "ci", "build", "3/7", 3, 7, 130.0, 3.2, 40.0, 50.0)]
     s.quota = {"claude": {"5h": 41, "wk": 63}}
     write_snapshot(snap_path, s)
@@ -808,6 +808,28 @@ def test_unchanged_file_after_resume_does_not_rebuild(snap_path, monkeypatch):
             assert "src-1" in app.dump()
 
     run(go())
+
+
+def test_llm_page_shows_every_server_with_its_models_and_queue(snap_path):
+    s = three()
+    now = time.time()
+    s.llms = [
+        LlmServer([LoadedModel("model-a:12b", 8 * 2**30, 128000, now + 240)], 1,
+                  [Inflight("model-a:12b", 100, now - 5)], {}, name="gpu-box", last_ok=now - 1),
+        LlmServer([LoadedModel("model-b:4b", 3 * 2**30, 8192, now + 60)], 4, [], {},
+                  name="laptop", last_ok=now - 300, reachable=False),
+    ]
+    write_snapshot(snap_path, s)
+
+    async def go():
+        app = make(snap_path, SID_A)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await first(pilot, app)
+            await pilot.press("3")
+            d = app.dump()
+            assert "gpu-box" in d and "laptop" in d
+            assert "model-a:12b" in d and "model-b:4b" in d
+            assert "queue 4" in d and "queue 1" in d
 
 
 def test_tui_shows_last_known_project_with_tilde(snap_path):

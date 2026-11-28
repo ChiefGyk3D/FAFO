@@ -203,10 +203,10 @@ function bodyLines(views: Views, ownId: string | null, w: number): Line[] {
 
 function extraLines(views: Views, w: number): Line[] {
   const out: Line[] = []
-  const l = views.llm
-  if (l) {
+  for (const l of views.llms) {
     const head = [
-      'LLM',
+      l.label && l.name ? `LLM ${l.name}` : 'LLM',
+      l.stale && l.age ? `last good ${l.age}` : '',
       l.queue === null ? '' : `queue ${l.queue}`,
       `in-flight ${l.inflight}`,
       l.gpu ? `gpu ${l.gpu}` : '',
