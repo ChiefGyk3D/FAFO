@@ -114,6 +114,12 @@ class _Memo:
     def text(self, s: str) -> str:
         return self._get("text", s, lambda x: self._cfg.alias(sanitize_text(x, _FIELD_MAX_LEN)))
 
+    def label(self, s: str) -> str:
+        """Credential-mask a display label (task, branch, workflow...); the text scrub follows."""
+        if not isinstance(s, str):
+            return mask_credentials(s)
+        return self._get("label", s, mask_credentials)
+
     def cmd(self, s: str) -> str:
         if not isinstance(s, str):
             return mask_credentials(s)  # returns "" for a non-str
@@ -142,12 +148,31 @@ def _scrub(obj: Any, cfg: Config, depth: int = 0, memo: _Memo | None = None) -> 
     return obj
 
 
+_SESSION_LABELS = ("task", "branch", "worktree", "name")
+_RUNNER_LABELS = ("repo", "workflow", "job", "step")
+
+
 def _scrub_result(res: SourceResult, cfg: Config, memo: _Memo | None = None) -> SourceResult:
     # Mask before the per-field length cap: a secret straddling the cap must not leak a prefix.
-    # Only Proc.cmd gets this; task, branch and worktree are plain labels and are not masked.
+    # Proc.cmd and the free-text display fields of session and runner rows (task, branch, worktree,
+    # workflow, job, step...) are masked: a source may hand over text that came from outside.
     mask = memo.cmd if memo is not None else mask_credentials
+    label = memo.label if memo is not None else mask_credentials
     procs = [dataclasses.replace(p, cmd=mask(p.cmd)) for p in res.procs]
-    return _scrub(dataclasses.replace(res, procs=procs), cfg, 0, memo)
+    sessions = [
+        dataclasses.replace(
+            x,
+            **{f: label(getattr(x, f)) for f in _SESSION_LABELS},
+        )
+        for x in res.sessions
+    ]
+    runners = [
+        dataclasses.replace(r, **{f: label(getattr(r, f)) for f in _RUNNER_LABELS})
+        for r in res.runners
+    ]
+    return _scrub(
+        dataclasses.replace(res, procs=procs, sessions=sessions, runners=runners), cfg, 0, memo
+    )
 
 
 @dataclass

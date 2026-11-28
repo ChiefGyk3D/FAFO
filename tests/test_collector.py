@@ -517,3 +517,60 @@ def test_one_failing_ollama_server_never_blanks_the_others_in_the_snapshot(tmp_p
     col._poll(col._states[0])
     assert col.snapshot().health[0].status == "down"
     assert {s.name for s in col.snapshot().llms} == {"alpha", "beta"}
+
+
+def test_display_fields_of_every_row_type_are_masked_in_snapshot_and_views(tmp_path):
+    from fafo.render.view import build_views
+
+    secret = "Zm9vYmFyYmF6" * 6
+    s = session(1)
+    s.task = f"run {secret}"
+    s.branch = "token=hunter2"
+    s.worktree = "Authorization: Bearer abc"
+    s.name = "token=hunter2"
+
+    class Raw:
+        name = "raw"
+
+        def collect(self, ctx):
+            return SourceResult(
+                sessions=[s],
+                runners=[Runner("r", "busy", "o/r", "token=hunter2", f"j {secret}",
+                                "Authorization: Bearer abc", 1, 2, 0.0, 0.0, 0.0, 0.0)],
+            )
+
+    cfg = make_cfg(tmp_path, raw=fast())
+    col = Collector(cfg, [Raw()], cfg.snapshot_path)
+    col._poll(col._states[0])
+    snap = col.snapshot()
+    views = build_views(snap, now=snap.taken)
+    for blob in (repr(snap), repr(views)):
+        for needle in ("hunter2", secret, "Bearer abc"):
+            assert needle not in blob, needle
+    assert "<redacted>" in snap.sessions[0].branch
+    assert "<redacted>" in snap.runners[0].workflow
+    # benign rows are untouched
+    ok = session(2)
+    assert col._memo.label(ok.task) == "t"
+
+
+def test_scrubbed_sessions_keep_distinct_ids(tmp_path):
+    rows = []
+    for i in range(10):
+        s = session(i + 1)
+        s.branch = f"token=secret{i}"
+        s.name = f"password: p{i}"
+        rows.append(s)
+
+    class Raw:
+        name = "raw"
+
+        def collect(self, ctx):
+            return SourceResult(sessions=rows)
+
+    cfg = make_cfg(tmp_path, raw=fast())
+    col = Collector(cfg, [Raw()], cfg.snapshot_path)
+    col._poll(col._states[0])
+    snap = col.snapshot()
+    assert len({x.session_id for x in snap.sessions}) == 10
+    assert len({x.pid for x in snap.sessions}) == 10

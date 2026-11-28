@@ -17,12 +17,14 @@ keeps the previous rows and marks the source stale or down.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from ..model import Session, Stamped
-from ..redact import sanitize_text
+from ..redact import mask_credentials, sanitize_text
 from ..source import Ctx, SourceResult
 
 CAPABILITY = (
@@ -45,7 +47,6 @@ _TASK_STATE = {
 MAX_UNCLASSIFIED = 1000
 _NAME_LEN = 60
 _TASK_LEN = 200
-_ID_LEN = 128
 
 
 class RunsApi(Protocol):
@@ -78,7 +79,22 @@ def _epoch(value: Any) -> float:
 
 
 def _str(value: Any, limit: int) -> str:
-    return sanitize_text(value, limit) if isinstance(value, str) else ""
+    """API-supplied display text: credential-masked first, so a secret cannot straddle the cap."""
+    return sanitize_text(mask_credentials(value), limit) if isinstance(value, str) else ""
+
+
+_PLAIN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _task_identity(tid: str) -> str:
+    """Stable row identity from the raw id: itself when plain, else a 16 hex digit digest.
+
+    Masking the id would map every credential-shaped id to the same text and merge distinct
+    tasks, so the identity is taken from the raw value; the raw text is never kept.
+    """
+    if _PLAIN_ID.fullmatch(tid) and mask_credentials(tid) == tid:
+        return tid
+    return hashlib.blake2b(tid.encode("utf-8", "surrogatepass"), digest_size=8).hexdigest()
 
 
 def _copilot_dynamic(run: Any) -> tuple[int, str] | None:
@@ -130,7 +146,7 @@ def _task_branch(task: dict) -> str:
         src = data if isinstance(data, dict) else art
         ref = src.get("head_ref")
         if isinstance(ref, str):
-            return sanitize_text(ref, 100)
+            return _str(ref, 100)
     return ""
 
 
@@ -165,7 +181,7 @@ def parse_agent_tasks(
         project_name = allowed.get(repo.strip().lower()) if isinstance(repo, str) else None
         if not project_name:
             continue
-        sid = sanitize_text(tid, _ID_LEN)
+        sid = _task_identity(tid)
         if not sid:
             continue
         out.append(

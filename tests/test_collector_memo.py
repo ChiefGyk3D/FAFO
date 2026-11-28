@@ -146,6 +146,7 @@ def test_memo_retains_no_raw_input_or_secret(tmp_path):
     for i, sec in enumerate(secrets):
         cmd = f"tool --token {sec} --user u{i} password={sec}"
         memo.text(memo.cmd(cmd))  # the production path: mask first, then the text scrub
+        memo.text(memo.label(f"branch token={sec} {i}"))  # display labels use the same path
     assert len(memo) > 0
     blobs = list(_walk_strings(memo))
     assert blobs  # the walk reached the cache contents

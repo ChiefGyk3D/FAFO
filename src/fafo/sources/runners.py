@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 
 from fafo.ghapi import GhClient
 from fafo.model import Runner
-from fafo.redact import sanitize_text
+from fafo.redact import mask_credentials, sanitize_text
 from fafo.source import Ctx, SourceResult
 from fafo.sshro import SshError, SshHost, ssh_ro
 
@@ -46,6 +46,13 @@ class RunnersCfg:
 
 
 def _txt(value: object) -> str:
+    """API-supplied display text: credential-masked before the length cap."""
+    return sanitize_text(mask_credentials(value), TEXT_MAX) if isinstance(value, str) else ""
+
+
+def _ident(value: object) -> str:
+    """Configured names (runner host, repo) identify a row: sanitized, never masked, so two
+    distinct names cannot collapse into one."""
     return sanitize_text(value, TEXT_MAX) if isinstance(value, str) else ""
 
 
@@ -204,7 +211,7 @@ class RunnersSource:
             elapsed = 0.0
             if match is not None:
                 repo, wf, j = match
-                repo = _txt(repo)
+                repo = _ident(repo)
                 jobname = _txt(j.get("name"))
                 step, step_n, step_total = _step_info(j)
                 started = _epoch(j.get("started_at"))
@@ -217,7 +224,7 @@ class RunnersSource:
                 state = "idle"
             rows.append(
                 Runner(
-                    name=_txt(host.name),
+                    name=_ident(host.name),
                     state=state,
                     repo=repo,
                     workflow=wf,
