@@ -263,3 +263,11 @@ def test_table_shows_every_server_labeled_with_models_queue_inflight():
 def test_table_single_default_server_is_unchanged_golden():
     # the golden fixture has one server named "ollama": no label line is added
     assert "ollama" not in format_table(views(), 144).split("LOCAL LLM")[1].split("RUNNERS")[0]
+
+
+def test_table_shows_last_known_project_with_tilde():
+    snap = golden_snapshot()
+    snap.sessions[0].project = Stamped("chatty-kathy", NOW)
+    snap.sessions[0].project_source = "last"
+    out = format_table(views(snap), 144)
+    assert "chatty-kathy~" in out

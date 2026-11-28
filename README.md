@@ -79,13 +79,54 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
 Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
 dead server never hides the others; its last rows stay and show their age. See `config.example.toml`.
 
+Helper processes: a session that runs many short helpers (`sleep`, `tail`, shells) would fill
+the screen, so the table, the terminal UI and the Claude pane show one summary row per session,
+for example `+16 helpers (sleep x6, bash x4, cat x3)` (the count is exact, the three most common
+names are listed). A helper stays visible when it uses 5 percent CPU or more, or when a process
+that is not boring runs below it. Set `collapse_helpers = false` to turn this off, or change the
+`boring_procs` list (program basenames, at most 64 of 1-32 characters from `A-Za-z0-9._-`).
+In the terminal UI, Enter or `x` on the summary row shows the full list for that session and
+toggles it back; the session screen always lists every process. The pane reads `collapsed` and
+`collapsed_names` from `views.json` (additive fields, schema unchanged).
+
+### Task labels
+
+The TASK column of a Claude session shows what it is doing. By default (`task_labels =
+"activity"` under `[sources.claude]`) that is the last tool plus a minimal object, such as
+`Bash: make` (first word of the command only) or `Edit: widget.py` (file name only), read from
+the last 64 KB of the session transcript and capped at 80 characters. When that tool call is more than two minutes old the label gets an
+age suffix such as `(5m ago)`. `"off"` shows the state
+only. `"prompt"` shows the first 60 characters of your last message. Masking is best effort
+(token shapes and keyword phrases such as `password: ...`), so it may still display other
+sensitive prose, on screen and in screenshots. Use it only if you are comfortable with that.
+
+### Snapshot compatibility
+
+The snapshot is strict JSON with a version number. Version 2 (current) adds `llms`, the list of
+local LLM servers (each with `name`, `last_ok` and `reachable`), and keeps `llm`, a copy of the
+first server. FAFO still reads version 1 files (one `llm`, no names; it becomes one server named
+`ollama`). An older FAFO that only knows version 1 refuses a version 2 file by design (strict
+version and key checks), so run the collector and the readers from the same release.
+
+An idle session shows its last-known repo with a trailing `~`. The snapshot records that in a
+per-session `project_source` key, written only when it is not `live`, under either version. A
+snapshot with no such session has the same session keys as before. A snapshot that does contain
+one is refused by readers that predate the key, because the schema is strict.
+
 ### Security notes
 
 - Read-only: FAFO never kills, dispatches, merges or writes to the things it observes. Its
   only write is the snapshot file (mode 0600; directories it creates are mode 0700).
 - Redaction happens in the collector before anything is written: command arguments are
-  scrubbed against an allowlist, environments and transcript text are never collected, and
+  scrubbed against an allowlist, environments are never collected, and transcript text is read only for the short task label described above, and
   configured host names are replaced by aliases.
+- Command lines are shown allowlist-first (`args_mode = "allowlist"`, the default). The opt-in
+  `args_mode = "safe"` also shows short bare words, flag names and the base name of a script,
+  module or path, at most 12 tokens. It never shows the word after a flag (a flag's value) unless
+  the flag is in `show_args`, and it hides URLs, anything with `@`, `:`, `=`, quotes or spaces,
+  and secret-looking words. A bare word that is a positional argument and does not follow a flag
+  can still show. Safe mode shows more of each command line on screen, in snapshots and in
+  screenshots, so it is off by default.
 - Secrets never go in the config file. A source that needs a token names an environment
   variable (`token_env`); the file is rejected if it contains a secret-looking key.
 - Everything printed passes through control-character stripping, so a hostile process name
@@ -93,5 +134,7 @@ dead server never hides the others; its last rows stay and show their age. See `
 
 Status: early development. See `docs/superpowers/specs/` for the design and
 `docs/superpowers/plans/` for the implementation plan.
+
+Contributing and review process: see `CONTRIBUTING.md`.
 
 License: Apache-2.0. Security reports: see `SECURITY.md`.

@@ -209,6 +209,28 @@ test('own session is first with a marker, children indented under their session'
   await ui.unmount()
 })
 
+test('collapsed helpers show as one summary row under their session', async ($, on) => {
+  const sessions = [
+    node(1, { collapsed: 16, collapsed_names: ['sleep x6', 'bash x4', 'cat x3', 'tail x1', ESC + '[31m'] }),
+    node(2),
+  ]
+  await load($, on, views({ sessions }))
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  const at = all.findIndex(t => /^ {2}work-1 /.test(t))
+  expect(all[at + 1]).toMatch(/^ {4}codex exec run-1/)
+  expect(all[at + 2]).toBe('    +16 helpers (sleep x6, bash x4, cat x3)')
+  expect(all.filter(t => t.includes('helpers'))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a views file without the collapsed fields still draws', async ($, on) => {
+  await load($, on, views({ sessions: [node(1, { collapsed: 'many', collapsed_names: 'x' })] }))
+  const ui = await draw($, 120)
+  expect((await lines(ui)).some(t => t.includes('helpers'))).toBe(false)
+  await ui.unmount()
+})
+
 test('stale rows are dimmed and carry an age tag', async ($, on) => {
   await load($, on, views({ sessions: [node(1, { stale: true, age: '30s' }), node(2)] }))
   const ui = await draw($, 120)

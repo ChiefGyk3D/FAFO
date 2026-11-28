@@ -337,3 +337,23 @@ def test_views_json_carries_llms_and_keeps_llm_as_the_first(tmp_path):
     assert [x["name"] for x in doc["llms"]] == ["alpha", "beta"]
     assert doc["llms"][1]["stale"] is True and doc["llm"]["name"] == "alpha"
     assert doc["llm"]["models"][0]["name"] == "m-a"
+
+
+def test_views_json_carries_source_and_tilde_label():
+    sn = snap(2)
+    sn.sessions[0].project_source = "last"
+    doc = views_to_dict(build_views(sn, NOW), snapshot=sn, generated=NOW)
+    node = next(n for n in doc["sessions"] if n["session_id"] == "sid-1")
+    assert node["project_source"] == "last" and node["project"].endswith("~")
+    idx = next(e for e in doc["session_index"] if e["session_id"] == "sid-1")
+    assert idx["project"].endswith("~")
+
+
+def test_session_index_keeps_marker_for_long_names_both_paths():
+    sn = snap(2)
+    sn.sessions[0].project = Stamped("p" * 60, NOW)
+    sn.sessions[0].project_source = "last"
+    for snapshot in (sn, None):
+        doc = views_to_dict(build_views(sn, NOW), snapshot=snapshot, generated=NOW)
+        idx = next(e for e in doc["session_index"] if e["session_id"] == "sid-1")
+        assert idx["project"].endswith("~") and len(idx["project"]) <= 48, snapshot is None

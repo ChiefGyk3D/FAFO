@@ -326,3 +326,25 @@ def test_single_default_server_is_unlabeled_and_other_name_is_labeled():
     assert build_views(snap(llms=[server("gpu-box", "m")]), NOW).llms[0].label is True
     two = build_views(snap(llms=[server("ollama", "m"), server("b", "m")]), NOW)
     assert all(s.label for s in two.llms)
+
+
+def test_last_known_project_gets_trailing_tilde_and_source():
+    last = sess(100, SID_A, "a", "chatty-kathy")
+    last.project_source = "last"
+    folder = sess(200, SID_B, "b", "src")
+    folder.project_source = "folder"
+    live = sess(300, SID_C, "c", "alpha")
+    v = build_views(snap(sessions=[last, folder, live]), NOW)
+    by = {n.name: n for n in v.sessions}
+    assert by["a"].project == "chatty-kathy~" and by["a"].project_source == "last"
+    assert by["b"].project == "src" and by["b"].project_source == "folder"
+    assert by["c"].project == "alpha" and by["c"].project_source == "live"
+
+
+def test_long_project_name_keeps_marker_within_cap():
+    from fafo.render.view import project_label
+
+    for n in (63, 64, 65, 200):
+        got = project_label("p" * n, "last")
+        assert got.endswith("~") and len(got) <= 64, n
+    assert project_label("p" * 200, "live") == "p" * 64

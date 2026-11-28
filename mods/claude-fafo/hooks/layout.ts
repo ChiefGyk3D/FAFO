@@ -180,6 +180,10 @@ function bodyLines(views: Views, ownId: string | null, w: number): Line[] {
     if (s.childrenHidden > 0) {
       out.push({ text: fit(`    +${s.childrenHidden} more`, w), dim: true })
     }
+    if (s.collapsed > 0) {
+      const names = s.collapsedNames.length > 0 ? ` (${s.collapsedNames.join(', ')})` : ''
+      out.push({ text: fit(`    +${s.collapsed} helpers${names}`, w), dim: true })
+    }
   }
   if (all.length > 0) out.push({ text: fit('SESSIONS', w), bold: true })
   for (const s of all) session(s)

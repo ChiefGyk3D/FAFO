@@ -10,6 +10,7 @@ export const MAX_CHILDREN = 256
 export const MAX_INDEX = 2000
 export const MAX_GROUPS = 50
 export const MAX_LIST = 100
+export const MAX_HELPER_NAMES = 3
 
 const CAP = 160
 
@@ -91,6 +92,9 @@ export type Sess = {
   age: string
   children: Child[]
   childrenHidden: number
+  // Boring helper processes the collector folded into one summary (absent in older files).
+  collapsed: number
+  collapsedNames: string[]
 }
 
 export type Group = { name: string; procs: Child[]; sessions: Sess[]; hidden: number }
@@ -190,6 +194,13 @@ function sess(o: Record<string, unknown>): Sess {
     age: clean(o.age, 12),
     children: rows(o.children, MAX_CHILDREN).map(child),
     childrenHidden: Math.max(0, Math.floor(num(o.children_hidden) ?? 0)),
+    collapsed: Math.max(0, Math.floor(num(o.collapsed) ?? 0)),
+    collapsedNames: Array.isArray(o.collapsed_names)
+      ? o.collapsed_names
+          .slice(0, MAX_HELPER_NAMES)
+          .map(n => clean(n, 40))
+          .filter(n => n !== '')
+      : [],
   }
 }
 

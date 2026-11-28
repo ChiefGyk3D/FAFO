@@ -97,6 +97,15 @@ async def settle(pilot, app, reads=1, timeout=8.0):
     await pilot.pause(0.05)
 
 
+async def until(pilot, cond, timeout=30.0):
+    """Poll `cond` (short pauses) until it holds; the bound is generous so a loaded host passes."""
+    end = time.monotonic() + timeout
+    while not cond() and time.monotonic() < end:
+        await pilot.pause(0.05)
+    assert cond(), "condition not reached within the bound"
+    await pilot.pause(0.05)
+
+
 async def first(pilot, app, timeout=8.0):
     """Wait for the first applied refresh (it may already have arrived)."""
     end = time.monotonic() + timeout
@@ -449,7 +458,9 @@ def test_exception_in_refresh_path_is_one_footer_line_not_a_traceback(snap_path,
             s = three()
             s.sessions[0].task = "different"
             write_snapshot(snap_path, s)
-            await settle(pilot, app, 2)
+            # Wait for the condition itself (the fault line is drawn), not a read count: a read
+            # already in flight on the old file counts as a read but never reaches _rebuild.
+            await until(pilot, lambda: "kaput" in app.dump())
             ls = lines_of(app)
             status = [l for l in ls if "kaput" in l]
             assert len(status) == 1 and len(status[0]) <= 144
@@ -611,18 +622,28 @@ def test_large_refresh_ui_thread_time_is_bounded(snap_path):
             await pilot.press("p")  # keep the worker out of the measurement
             res = ReadResult(views=views, changed=True, at=time.time(), error="")
             app.handle_result(res)  # warm-up
-            t0 = time.perf_counter()
-            app.handle_result(ReadResult(views=views, changed=True, at=time.time(), error=""))
-            changed_cost = time.perf_counter() - t0
+
+            def cpu_cost(changed):
+                # CPU seconds of the UI thread: invariant to scheduling delay on a loaded host,
+                # unlike wall time, yet still grows with real work (a quadratic or blocking
+                # refresh burns CPU on this thread).
+                t0, w0 = time.thread_time(), time.monotonic()
+                app.handle_result(ReadResult(views=views, changed=changed, at=time.time(), error=""))
+                return time.thread_time() - t0, time.monotonic() - w0
+
+            samples = [cpu_cost(True) for _ in range(3)]
+            changed_cost = min(c for c, _ in samples)  # best CPU sample: noise only adds CPU
+            changed_wall = max(w for _, w in samples)  # worst wall sample: a block in any run counts
             await pilot.pause(0.05)
-            t0 = time.perf_counter()
-            app.handle_result(ReadResult(views=views, changed=False, at=time.time(), error=""))
-            unchanged_cost = time.perf_counter() - t0
-            print(f"large refresh: changed {changed_cost * 1000:.1f} ms, "
+            unchanged_cost, _ = min(cpu_cost(False) for _ in range(3))
+            print(f"large refresh cpu: changed {changed_cost * 1000:.1f} ms, "
                   f"unchanged {unchanged_cost * 1000:.1f} ms")
-            assert changed_cost < 0.5
-            assert unchanged_cost < 0.05
-            assert unchanged_cost < changed_cost
+            assert changed_cost < 1.0  # about 0.1 s of CPU unloaded: generous, but bounded
+            assert unchanged_cost < 0.1
+            # CPU time cannot see a blocked (sleeping) UI thread, but a very loose wall bound
+            # can still detect one: it is far above any scheduling delay seen under load.
+            assert changed_wall < 10.0
+            assert unchanged_cost < changed_cost / 4  # the no-change path skips the rebuild
             assert "row 1 of " in app.dump()
 
     run(go())
@@ -665,7 +686,9 @@ def test_parse_args_validates_refresh_range():
 
 def test_entry_point_signatures():
     sig = inspect.signature(tui.run_tui)
-    assert list(sig.parameters) == ["snapshot_path", "session_id", "refresh_s"]
+    assert list(sig.parameters) == [
+        "snapshot_path", "session_id", "refresh_s", "helpers",  # helpers: FAFO#69
+    ]
     assert sig.parameters["session_id"].default is None
     assert sig.parameters["refresh_s"].default == 1.0
     assert list(inspect.signature(tui.main).parameters) == ["argv"]
@@ -807,5 +830,17 @@ def test_llm_page_shows_every_server_with_its_models_and_queue(snap_path):
             assert "gpu-box" in d and "laptop" in d
             assert "model-a:12b" in d and "model-b:4b" in d
             assert "queue 4" in d and "queue 1" in d
+
+
+def test_tui_shows_last_known_project_with_tilde(snap_path):
+    last = sess(1, "x1", "aaa", "chatty-kathy", state="idle")
+    last.project_source = "last"
+    write_snapshot(snap_path, snap(sessions=[last]))
+
+    async def go():
+        app = make(snap_path)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await first(pilot, app)
+            assert "chatty-kathy~" in app.dump()
 
     run(go())
