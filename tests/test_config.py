@@ -118,6 +118,21 @@ def test_invalid_interval_or_timeout_rejected(tmp_path, field, bad):
         load_config(write(tmp_path, f"[sources.host]\n{field} = {bad}\n"))
 
 
+@pytest.mark.parametrize("bad", ["0.1", "0.5", "0.99"])
+def test_ollama_timeout_below_the_minimum_is_rejected_without_echoing_it(tmp_path, bad):
+    with pytest.raises(ConfigError, match=r"sources\.ollama\.timeout_s") as exc:
+        load_config(write(tmp_path, f'[sources.ollama]\nurl = "http://a.invalid"\ntimeout_s = {bad}\n'))
+    assert bad not in str(exc.value)
+
+
+def test_ollama_timeout_at_the_minimum_is_accepted_and_other_sources_keep_theirs(tmp_path):
+    cfg = load_config(
+        write(tmp_path, '[sources.ollama]\nurl = "http://a.invalid"\ntimeout_s = 1\n'
+                        "[sources.host]\ntimeout_s = 0.2\n")
+    )
+    assert cfg.sources["ollama"].timeout_s == 1 and cfg.sources["host"].timeout_s == 0.2
+
+
 def test_missing_explicit_path_raises(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "nope.toml")

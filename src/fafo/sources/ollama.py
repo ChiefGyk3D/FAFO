@@ -30,21 +30,21 @@ from ..source import Ctx, SourceResult
 
 TIMEOUT_S = 3.0  # most one request may take (default_http_get enforces it)
 # One server's whole poll (/api/ps then /api/version) shares ONE deadline, measured on the
-# injected clock: poll_deadline(timeout_s) = min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s -
-# WAIT_MARGIN_S)), where timeout_s is the source's own timeout from its config (the collector
-# abandons collect() after that long). Servers are polled in parallel, so collect() takes at most
+# injected clock: poll_deadline(timeout_s) = min(POLL_DEADLINE_S, max(timeout_s - WAIT_MARGIN_S,
+# timeout_s / 2)), where timeout_s is the source's own timeout from its config (the collector
+# abandons collect() after that long; the config refuses a value below MIN_TIMEOUT_S). The deadline
+# is always strictly below timeout_s. Servers are polled in parallel, so collect() takes at most
 # that deadline, always inside the outer timeout. Each request gets min(TIMEOUT_S, time left), at
 # least MIN_REQUEST_S; a request is not started once the time is spent. After the wait the worker
 # thread is abandoned.
 POLL_DEADLINE_S = 2 * TIMEOUT_S  # ceiling
-MIN_POLL_S = 0.5  # floor, for a tiny configured timeout
 MIN_REQUEST_S = 0.2
 WAIT_MARGIN_S = 0.5  # kept free of the outer timeout
 
 
 def poll_deadline(timeout_s: float) -> float:
     """Seconds one server's whole poll may take for a source timeout of timeout_s."""
-    return min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s - WAIT_MARGIN_S))
+    return min(POLL_DEADLINE_S, max(timeout_s - WAIT_MARGIN_S, timeout_s / 2))
 
 
 MAX_BODY = 256 * 1024

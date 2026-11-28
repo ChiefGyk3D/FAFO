@@ -19,7 +19,7 @@ from ..redact import sanitize_text
 from ..store import read_snapshot
 
 MAX_SESSIONS = 200
-MAX_CHILDREN = 256
+MAX_CHILDREN = 256  # rows kept per session for children and for expanded helpers; the rest are counted
 MAX_GROUP_ROWS = 256
 MAX_RUNNERS = 64
 MAX_MODELS = 32
