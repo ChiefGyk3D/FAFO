@@ -355,3 +355,57 @@ def test_slowish_healthy_server_in_real_time_is_waited_for_the_whole_poll_budget
     ctx = Ctx(cfg=SourceCfg(), clock=time.time, log=logging.getLogger("t"))
     res = src.collect(ctx)
     assert res.llms[0].reachable and res.status is None
+
+
+# ---- the poll deadline follows the source timeout ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("timeout_s", "expected"),
+    [(3.0, 2.5), (5.0, 4.5), (6.5, 6.0), (10.0, 6.0), (0.1, ollama_mod.MIN_POLL_S)],
+)
+def test_poll_deadline_is_min_of_ceiling_and_timeout_minus_margin(timeout_s, expected):
+    assert ollama_mod.poll_deadline(timeout_s) == expected
+    assert ollama_mod.POLL_DEADLINE_S == 6.0 and ollama_mod.WAIT_MARGIN_S == 0.5
+
+
+@pytest.mark.parametrize("timeout_s", [1.0, 2.0, 3.0])
+def test_collect_never_outlasts_the_configured_timeout_when_every_request_hangs(timeout_s):
+    release = threading.Event()
+    src = OllamaSource(
+        servers=[ServerSpec("alpha", A), ServerSpec("beta", B)],
+        http=lambda u, t, m: release.wait(30),
+    )
+    ctx = Ctx(cfg=SourceCfg(timeout_s=timeout_s), clock=time.time, log=logging.getLogger("t"))
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            src.collect(ctx)
+        took = time.monotonic() - t0
+    finally:
+        release.set()
+    assert took < timeout_s, took  # the outer collector would have abandoned it otherwise
+    assert took >= ollama_mod.poll_deadline(timeout_s) - 0.1  # and it did use the budget
+
+
+def test_slowish_healthy_servers_succeed_within_a_3s_timeout():
+    inner = Net({A: ["m-a"], B: ["m-b"]})
+
+    def slow(url, timeout, max_bytes):
+        time.sleep(0.4)  # two requests: 0.8 s, inside 2.5 s
+        return inner(url, timeout, max_bytes)
+
+    src = OllamaSource(servers=[ServerSpec("alpha", A), ServerSpec("beta", B)], http=slow)
+    ctx = Ctx(cfg=SourceCfg(timeout_s=3.0), clock=time.time, log=logging.getLogger("t"))
+    t0 = time.monotonic()
+    res = src.collect(ctx)
+    assert time.monotonic() - t0 < 3.0
+    assert all(s.reachable for s in res.llms) and res.status is None
+
+
+def test_request_timeout_passed_down_fits_the_derived_deadline():
+    clock = Clock()
+    net = SlowNet({A: ["m"]}, clock, 0.0)
+    src = OllamaSource(servers=[ServerSpec("alpha", A)], http=net)
+    src.collect(Ctx(cfg=SourceCfg(timeout_s=2.0), clock=clock, log=logging.getLogger("t")))
+    assert max(net.timeouts) <= ollama_mod.poll_deadline(2.0)

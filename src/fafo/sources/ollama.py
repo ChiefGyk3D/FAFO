@@ -29,13 +29,24 @@ from ..redact import sanitize_text
 from ..source import Ctx, SourceResult
 
 TIMEOUT_S = 3.0  # most one request may take (default_http_get enforces it)
-# One server's whole poll (/api/ps then /api/version) shares ONE deadline of this many seconds,
-# measured on the injected clock. Each request gets min(TIMEOUT_S, time left), at least
-# MIN_REQUEST_S; a request is not started once the time is spent. The collector waits for a
-# poll at most POLL_DEADLINE_S + WAIT_MARGIN_S of real time, then abandons the worker thread.
-POLL_DEADLINE_S = 2 * TIMEOUT_S
+# One server's whole poll (/api/ps then /api/version) shares ONE deadline, measured on the
+# injected clock: poll_deadline(timeout_s) = min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s -
+# WAIT_MARGIN_S)), where timeout_s is the source's own timeout from its config (the collector
+# abandons collect() after that long). Servers are polled in parallel, so collect() takes at most
+# that deadline, always inside the outer timeout. Each request gets min(TIMEOUT_S, time left), at
+# least MIN_REQUEST_S; a request is not started once the time is spent. After the wait the worker
+# thread is abandoned.
+POLL_DEADLINE_S = 2 * TIMEOUT_S  # ceiling
+MIN_POLL_S = 0.5  # floor, for a tiny configured timeout
 MIN_REQUEST_S = 0.2
-WAIT_MARGIN_S = 0.5
+WAIT_MARGIN_S = 0.5  # kept free of the outer timeout
+
+
+def poll_deadline(timeout_s: float) -> float:
+    """Seconds one server's whole poll may take for a source timeout of timeout_s."""
+    return min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s - WAIT_MARGIN_S))
+
+
 MAX_BODY = 256 * 1024
 MAX_DEPTH = 16
 MAX_MODELS = 64
@@ -328,9 +339,11 @@ class OllamaSource:
             raise RuntimeError(f"ollama {path}: HTTP {resp.status}")
         return _parse_json(resp.body)
 
-    def _poll_one(self, srv: _Server, clock: Callable[[], float]) -> LlmServer:
+    def _poll_one(
+        self, srv: _Server, clock: Callable[[], float], budget: float
+    ) -> LlmServer:
         start = clock()
-        deadline = start + POLL_DEADLINE_S
+        deadline = start + budget
         data = self._get(srv.url, "/api/ps", deadline, clock)
         self._get(srv.url, "/api/version", deadline, clock)
         listed = data.get("models") if isinstance(data, dict) else None
@@ -349,14 +362,14 @@ class OllamaSource:
             name=srv.spec.name, last_ok=start, reachable=True,
         )
 
-    def _start(self, srv: _Server, clock: Callable[[], float]) -> None:
+    def _start(self, srv: _Server, clock: Callable[[], float], budget: float) -> None:
         """One daemon thread per server per collect; its result goes in its own box."""
         box: dict = {}
         done = threading.Event()
 
         def run() -> None:
             try:
-                box["r"] = self._poll_one(srv, clock)
+                box["r"] = self._poll_one(srv, clock, budget)
             except BaseException as exc:  # noqa: BLE001 - a poll must never kill the thread silently
                 box["e"] = exc
             finally:
@@ -376,6 +389,7 @@ class OllamaSource:
     def collect(self, ctx: Ctx) -> SourceResult:
         now = ctx.clock()
         interval = ctx.cfg.interval_s
+        budget = poll_deadline(ctx.cfg.timeout_s)
         polled: list[_Server] = []
         for srv in self._servers:
             if srv.worker is not None and srv.worker.is_alive() and not (
@@ -386,9 +400,9 @@ class OllamaSource:
                 continue
             if now < srv.next_try:
                 continue  # backing off: keep its last rows, poll the others
-            self._start(srv, ctx.clock)
+            self._start(srv, ctx.clock, budget)
             polled.append(srv)
-        end = time.monotonic() + POLL_DEADLINE_S + WAIT_MARGIN_S
+        end = time.monotonic() + budget
         for srv in polled:
             if srv.done is not None:
                 srv.done.wait(max(0.0, end - time.monotonic()))
