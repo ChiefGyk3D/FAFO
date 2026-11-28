@@ -340,3 +340,18 @@ def test_process_exits_with_a_poll_still_hung():
         check=False,
     )
     assert out.returncode == 0 and "left-main" in out.stdout
+
+
+def test_slowish_healthy_server_in_real_time_is_waited_for_the_whole_poll_budget(monkeypatch):
+    monkeypatch.setattr(ollama_mod, "POLL_DEADLINE_S", 1.5)
+    monkeypatch.setattr(ollama_mod, "WAIT_MARGIN_S", 0.2)
+    inner = Net({A: ["m-a"]})
+
+    def slow(url, timeout, max_bytes):
+        time.sleep(0.5)  # two requests of 0.5 s: 1.0 s, longer than one request's share
+        return inner(url, timeout, max_bytes)
+
+    src = OllamaSource(servers=[ServerSpec("alpha", A)], http=slow)
+    ctx = Ctx(cfg=SourceCfg(), clock=time.time, log=logging.getLogger("t"))
+    res = src.collect(ctx)
+    assert res.llms[0].reachable and res.status is None
