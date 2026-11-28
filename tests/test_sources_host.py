@@ -16,7 +16,7 @@ from conftest import Ran, deadline_bound, run_when_ready, wait_gone
 
 from fafo.config import SourceCfg
 from fafo.source import Ctx
-from fafo.sources.host import MAX_ITEMS, HostSource
+from fafo.sources.host import MAX_EXAMINED, MAX_ITEMS, HostSource
 
 Mem = namedtuple("Mem", "total used percent")
 Swap = namedtuple("Swap", "total used")
@@ -296,3 +296,50 @@ def test_normal_exit_leaves_no_grandchild(tmp_path):
     for pid in r.pids:
         os.kill(pid, 9)
     raise AssertionError("grandchild survived a normal exit")
+
+
+class _Overrun(AssertionError):
+    pass
+
+
+def _bounded_gen(make, limit):
+    """Yield make(i) forever, but fail the test if more than limit items are pulled."""
+    for i in range(limit + 1):
+        yield make(i)
+    raise _Overrun("consumed past the examination cap")
+
+
+class _BoundedMapping(dict):
+    """A mapping that claims 100000 interfaces but raises if iterated past the cap."""
+
+    def __iter__(self):
+        return _bounded_gen(lambda i: f"if{i:06d}", MAX_EXAMINED)
+
+    def __len__(self):
+        return 100_000
+
+    def __getitem__(self, k):
+        return Net(1, 1)
+
+
+def test_disk_partitions_examined_up_to_the_cap_only():
+    p = StubProbe()
+    p.disk_partitions = lambda: _bounded_gen(lambda i: Part(f"/dev/sd{i}", f"/m{i:06d}", "ext4"), MAX_EXAMINED)
+    h = make_src(p).collect(make_ctx()).host
+    assert MAX_EXAMINED == 4096
+    assert len(h["disks"]) == MAX_ITEMS
+
+
+def test_net_interfaces_examined_up_to_the_cap_only():
+    p = StubProbe()
+    p.net_io_counters = lambda: _BoundedMapping()
+    h = make_src(p).collect(make_ctx()).host
+    assert len(h["net"]) == MAX_ITEMS
+
+
+def test_a_100000_entry_probe_still_yields_16_rows():
+    p = StubProbe()
+    p.parts = [Part(f"/dev/sd{i}", f"/m{i:06d}", "ext4") for i in range(100_000)]
+    p.net = {f"if{i:06d}": Net(i, i) for i in range(100_000)}
+    h = make_src(p).collect(make_ctx()).host
+    assert len(h["disks"]) == MAX_ITEMS and len(h["net"]) == MAX_ITEMS

@@ -11,6 +11,7 @@ deadline or oversize.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import selectors
@@ -25,6 +26,7 @@ from fafo.redact import sanitize_text
 from fafo.source import Ctx, SourceResult
 
 MAX_ITEMS = 16
+MAX_EXAMINED = 4096  # partitions or interfaces looked at before the sort; the rest are ignored
 MAX_GPU_OUTPUT = 64 * 1024
 GPU_TIMEOUT_S = 2.0
 _STR_LEN = 100
@@ -224,7 +226,8 @@ class HostSource:
 
     def _disks(self, probe: Any) -> list[dict]:
         disks: list[dict] = []
-        for part in sorted(probe.disk_partitions(), key=lambda p: str(p.mountpoint)):
+        examined = itertools.islice(probe.disk_partitions(), MAX_EXAMINED)
+        for part in sorted(examined, key=lambda p: str(p.mountpoint)):
             if len(disks) >= MAX_ITEMS:
                 break
             if not _real_fs(part):
@@ -247,7 +250,7 @@ class HostSource:
         counters = probe.net_io_counters()
         rows: list[dict] = []
         seen: dict[str, tuple[float, int, int]] = {}
-        for iface in sorted(counters)[:MAX_ITEMS]:
+        for iface in sorted(itertools.islice(counters, MAX_EXAMINED))[:MAX_ITEMS]:
             c = counters[iface]
             rx, tx = int(c.bytes_recv), int(c.bytes_sent)
             seen[iface] = (now, rx, tx)
