@@ -71,12 +71,46 @@ Without anything else, Codex processes show as plain rows. To get a Codex sessio
 session id as the address, and `you are here`, install a SessionStart hook:
 
 1. Copy `examples/codex/fafo-session-hook.sh` somewhere you own and make it executable.
-2. Register it as a Codex `SessionStart` command hook. FORMAT TO CONFIRM against the current
-   Codex docs (hooks and config reference): the configuration file name and syntax were not
-   verifiable offline when this was written. The hook itself is a plain command that reads JSON
-   on stdin, so it needs only the command path (and, optionally, a state directory argument).
-3. Run `fafo tui --session auto` (or `fafo table --session auto`) from a shell that is a
-   descendant of the Codex process, or `fafo tui --session CODEX_SESSION_ID` from anywhere.
+2. Register it as a Codex `SessionStart` command hook in `$CODEX_HOME/hooks.json` (usually
+   `~/.codex/hooks.json`; the exact path below must be absolute and quoted for a shell string):
+
+   ```json
+   {
+     "hooks": {
+       "SessionStart": [
+         {
+           "matcher": "startup|resume",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "'/home/you/.codex/hooks/fafo-session-hook.sh'",
+               "statusMessage": "Recording session for FAFO"
+             }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+   The `matcher` makes resumed sessions record too. The `timeout` default is irrelevant: the
+   hook finishes at once.
+3. Trust the hook once. Codex requires you to review and trust a user hook definition before it
+   runs: open `/hooks` inside Codex and trust it. An untrusted hook does not run, and FAFO then
+   shows the session as a plain process row.
+4. Verify by hand: (a) start Codex; (b) check that `<codex pid>.json` exists in the
+   `codex-here` folder (see below) with mode 0600 and contains only `session_id`, `ppid` and
+   `started_at`; (c) run `fafo tui --session auto` in a pane whose shell descends from the Codex
+   process, or `fafo tui --session CODEX_SESSION_ID` from anywhere, and look for the marker.
+
+What is documented and what is not: per the Codex hooks page as read 2026-11-27 (confirm with
+`/hooks`), user hooks live in `$CODEX_HOME/hooks.json`, the format is JSON, SessionStart entries
+have a `matcher` and a `hooks` list of `type`/`command`/`statusMessage` handlers, the hook gets
+one JSON object on stdin with `session_id`, and exit 0 with no output is success. The exact
+top-level `{"hooks": {...}}` wrapper was inferred from the statement that SessionStart sits in
+the top-level hooks object, not copied verbatim. The page does not say whether `command` is a
+shell string or an argument list (the quoted path above works for a shell string), what the
+hook's environment is, or which process is the hook's parent.
 
 What the hook writes: `<state dir>/codex-here/<codex pid>.json` with exactly `session_id`,
 `ppid` and `started_at`, atomically, mode 0600 in a 0700 directory. The state dir is the
@@ -94,8 +128,9 @@ allowance covers the different clocks). A reused pid, or a Codex session whose h
 within 10 minutes of its start, is not matched and shows as a plain process row. The collector
 never deletes files; remove stale ones yourself, for example
 `find ~/.local/state/fafo/codex-here -name '*.json' -mtime +7 -delete`.
-The hook's parent process must be the Codex process itself; if Codex starts hooks through an
-intermediate process, no session row appears (unverified).
+The hook's parent process being the Codex process is not stated by the Codex docs. FAFO relies
+on it and checks it with the pid and start-time rule above: if Codex starts hooks through an
+intermediate process, no record matches and no session row appears.
 
 ### Claude pane
 
