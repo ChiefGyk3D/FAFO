@@ -206,10 +206,18 @@ done and failed counts. `jobs_dir` is required: the folder holding the plugin's
 its `pid` is alive. Job files are untrusted: each is opened without following links and must be a
 regular file you own, not group or world writable, at most 64 KB, with a known `status`;
 anything else is counted as unreadable and never shown. At most 512 directory entries are
-examined and 64 rows kept; the rest are counted. Job titles can contain your prompt text, so they
-are hidden unless `show_titles = true`; shown titles are credential-masked, stripped of control
-characters and cut to 60 characters, and are never logged. The snapshot gains an optional
-`jobs` key, present only when this source ran, so snapshots without it are unchanged.
+examined and 64 rows kept; the rest are counted. A `*.json` entry whose status cannot be read
+is counted as unreadable, and each folder the budget does not reach counts as not examined.
+Job titles can contain your prompt text, so they are hidden unless `show_titles = true`; titles
+are never logged. The snapshot gains an optional `jobs` key, present only when this source ran,
+so snapshots without it are unchanged.
+
+Shown titles are free text and masking is best effort. It covers token shapes, `key=value` and
+flag-value forms (`--token value`, including values split by tabs, newlines or other control
+characters) and keyword phrases. It does not cover a bare secret word followed by a plain value
+(`api_key hunter2`), nor a secret flag split by a terminal escape sequence. Enable `show_titles`
+only if you accept that titles may appear on screen and in snapshots. Titles are cut to 60
+characters after masking.
 
 ### Task labels
 

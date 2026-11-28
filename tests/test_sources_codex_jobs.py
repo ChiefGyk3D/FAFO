@@ -499,3 +499,44 @@ def test_title_control_between_key_and_value_hides_the_value(jd, title):
 def test_title_benign_controls_keep_single_spaces(jd):
     put(jd, "a.json", job("running", title="fix" + chr(9) + "the" + chr(0) + "bug"))
     assert collect(jd, show_titles=True).jobs.rows[0].title == "fix the bug"
+
+
+# -- entries the scan cannot judge are counted, never dropped ------------------------------
+def test_json_entry_whose_stat_fails_is_counted_invalid(jd, monkeypatch):
+    """A *.json entry whose stat() fails is neither a known job nor a regular file: invalid.
+    A name that is not *.json is not a job and is not counted."""
+
+    class Entry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def stat(self, follow_symlinks: bool = True):
+            raise OSError("vanished")
+
+    names = ["a.json", "b.json", "c.json", "notes.txt"]
+
+    class Listing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def __iter__(self):
+            return iter(Entry(n) for n in names)
+
+    monkeypatch.setattr(codex_jobs.os, "scandir", lambda _fd: Listing())
+    s = collect(jd).jobs
+    assert (s.running, s.done, s.invalid, s.unread) == (0, 0, 3, 0)
+
+
+def test_folders_skipped_after_the_root_budget_are_counted_unread(jd, monkeypatch):
+    """Five folders, a root budget of three: none is descended, and each unexamined folder
+    counts as unread (its job files cannot be listed without spending the budget again)."""
+    monkeypatch.setattr(codex_jobs, "MAX_ENTRIES", 3)
+    for i in range(5):
+        sub = jd / f"id{i}" / "jobs"
+        sub.mkdir(parents=True)
+        put(sub, "j.json", job("completed", completed=-10))
+    s = collect(jd).jobs
+    assert (s.done, s.unread) == (0, 5)

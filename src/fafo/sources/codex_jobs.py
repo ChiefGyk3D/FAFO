@@ -13,9 +13,15 @@ against a fixed schema. A file that fails any of this is counted as invalid and 
 `*.json` entry that is not a regular file (symlink, FIFO, directory, device) is counted as invalid
 from its listing and is never opened.
 
-Titles may hold prompt text, so they are hidden unless `show_titles` is set; shown titles are
-credential-masked over the whole title, stripped of control characters and cut to 60 characters.
+Titles may hold prompt text, so they are hidden unless `show_titles` is set. Shown titles are
+free text and masking is best effort: it covers token shapes, `key=value` and flag-value forms and
+keyword phrases, with controls and separators treated as word breaks. It does not cover a bare
+secret word followed by a plain value, nor a secret flag split by a terminal escape sequence.
+Shown titles are normalized over the whole title, credential-masked, and cut to 60 characters.
 Titles are never logged. Counts (running, done, failed) are always produced.
+
+Counting: `invalid` counts every file that fails the checks above, including a `*.json` entry
+whose stat fails. `unread` counts entries not examined, and each folder the budget does not reach.
 """
 
 from __future__ import annotations
@@ -188,15 +194,19 @@ def _title(raw: str) -> str:
     return masked_text(raw, MAX_TITLE, MAX_FILE_BYTES)
 
 
-def _scan(fd: int, cap: int, extra_cap: int) -> tuple[list[tuple[str, int, float, bool]], int, int]:
+def _scan(
+    fd: int, cap: int, extra_cap: int
+) -> tuple[list[tuple[str, int, float, bool]], int, int, int]:
     """Entries of one folder: (name, mode, mtime, is_dir) for each entry examined (lstat only),
-    the number examined, and the number seen beyond the cap (at most extra_cap).
+    the number examined, the number seen beyond the cap (at most extra_cap), and the number of
+    `*.json` entries whose stat failed (they cannot be judged, so the caller counts them invalid).
 
     Every entry pulled from scandir counts against the cap before its stat is tried, so entries
     whose stat fails still use the budget. The loop stops once both budgets are spent."""
     out: list[tuple[str, int, float, bool]] = []
     examined = 0
     extra = 0
+    unstatable = 0
     with os.scandir(fd) as listing:
         feed = iter(listing)
         while examined < cap or extra < extra_cap:
@@ -210,9 +220,11 @@ def _scan(fd: int, cap: int, extra_cap: int) -> tuple[list[tuple[str, int, float
             try:
                 st = entry.stat(follow_symlinks=False)
             except OSError:
+                if entry.name.endswith(".json"):
+                    unstatable += 1
                 continue
             out.append((entry.name, st.st_mode, st.st_mtime, stat.S_ISDIR(st.st_mode)))
-    return out, examined, extra
+    return out, examined, extra, unstatable
 
 
 def _open_dir(name: str, dir_fd: int | None) -> int:
@@ -248,28 +260,34 @@ def _candidates(root_fd: int) -> tuple[list[tuple[float, str, str]], int, int]:
     never opened). At most one `<id>/jobs` folder is open at a time, and it is closed before the
     next one is opened."""
     found: list[tuple[float, str, str]] = []
-    entries, examined, extra = _scan(root_fd, MAX_ENTRIES, MAX_COUNT_EXTRA)
+    entries, examined, extra, invalid = _scan(root_fd, MAX_ENTRIES, MAX_COUNT_EXTRA)
     remaining = MAX_ENTRIES - examined
-    invalid = 0
     for name, mode, mtime, is_dir in entries:
         if name.endswith(".json"):
             if stat.S_ISREG(mode):
                 found.append((mtime, "", name))
             else:
                 invalid += 1
-        elif is_dir and remaining > 0:
-            try:
-                jobs_fd = _open_jobs(root_fd, name)
-            except OSError:
+        elif is_dir:
+            if remaining <= 0:
+                extra += 1  # a folder the budget never reached: its job files are unexamined
                 continue
             try:
-                sub, sub_examined, sub_extra = _scan(
+                jobs_fd = _open_jobs(root_fd, name)
+            except FileNotFoundError:
+                continue  # no jobs folder: no job files to count
+            except OSError:
+                extra += 1  # present but unreadable: its job files are unexamined
+                continue
+            try:
+                sub, sub_examined, sub_extra, sub_bad = _scan(
                     jobs_fd, min(remaining, MAX_JOB_ENTRIES), MAX_COUNT_EXTRA - extra
                 )
             finally:
                 os.close(jobs_fd)
             remaining -= sub_examined
             extra += sub_extra
+            invalid += sub_bad
             for sub_name, sub_mode, sub_mtime, _ in sub:
                 if sub_name.endswith(".json"):
                     if stat.S_ISREG(sub_mode):
