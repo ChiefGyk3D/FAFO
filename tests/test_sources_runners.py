@@ -319,3 +319,11 @@ def test_benign_runner_labels_unchanged():
     gh = FakeGh({("o/r", "in_progress"): [run_of(1, "CI")]}, {("o/r", 1): [job()]})
     (r,) = collect(RunnersSource(cfg(), gh, ssh=good_ssh)).runners
     assert (r.workflow, r.job, r.step) == ("CI", "build", "step3")
+
+
+def test_runner_rows_stay_distinct_when_names_look_like_credentials():
+    hosts = [RunnerHost(f"token={i}-runner", SshHost("h"), None) for i in range(5)]
+    hosts += [RunnerHost("r" * 60 + str(i), SshHost("h"), None) for i in range(5)]
+    res = collect(RunnersSource(cfg(runners=hosts), FakeGh(), ssh=good_ssh))
+    names = [r.name for r in res.runners]
+    assert len(names) == 10 and len(set(names)) == 10
