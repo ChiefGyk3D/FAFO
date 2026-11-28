@@ -335,7 +335,7 @@ def test_process_exits_with_a_poll_still_hung():
         "    pass\n"
         "print('left-main')\n"
     )
-    out = subprocess.run(  # noqa: S603 - fixed argv, our own script, bounded timeout
+    out = subprocess.run(
         [sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=20,
         check=False,
     )
