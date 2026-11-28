@@ -159,6 +159,23 @@ enabled = true
 # session_paths = ["dynamic/agents/example"]
 #@ END example
 
+#@ BEGIN example
+## Codex plugin jobs: running jobs and jobs finished recently. Off until this table exists.
+## jobs_dir is required: the folder that holds the plugin's <id>/jobs/*.json folders, or the
+## job files themselves. It must be a real directory (a symlink is refused). Files must be
+## regular, owned by you, not group or world writable, at most 64 KB; anything else is counted
+## as unreadable and never shown.
+# [sources.codex_jobs]
+# enabled = true
+# interval_s = 5
+# jobs_dir = "~/.claude/plugins/data/codex-openai-codex/state"
+## Minutes a finished job stays in the count (1 to 1440). Default 60.
+# window_minutes = 60
+## Job titles can hold prompt text, so they are hidden by default (counts and state only).
+## true shows them, credential-masked and cut to 60 characters. Titles are never logged.
+# show_titles = false
+#@ END example
+
 # Hostnames and IPs are replaced by these aliases before anything is written.
 [aliases]
 "ai-server.example.invalid" = "ai-server"

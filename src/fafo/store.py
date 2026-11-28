@@ -31,6 +31,8 @@ from .model import (
     OLD_SNAPSHOT_VERSION,
     SNAPSHOT_VERSION,
     Inflight,
+    JobRow,
+    JobSummary,
     LlmServer,
     LoadedModel,
     Proc,
@@ -97,6 +99,8 @@ def write_snapshot(
     if replaced:
         _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
     _omit_default_source(plain)
+    if plain.get("jobs") is None:
+        plain.pop("jobs", None)  # additive key: absent unless a jobs source ran
     plain["llm"] = plain["llms"][0] if plain["llms"] else None  # first server, for older readers
     payload = _encode(plain)
     if len(payload) > MAX_SNAPSHOT_BYTES:
@@ -308,6 +312,26 @@ def _health_name(v):
         raise TypeError("bad health name")
 
 
+def _job_state(v):
+    if type(v) is not str or v not in ("running", "done", "failed"):
+        raise TypeError("bad job state")
+
+
+_MAX_JOB_ROWS = 64
+_JOB_COUNTS = {"running": _int, "done": _int, "failed": _int, "hidden": _int, "invalid": _int,
+               "unread": _int}
+
+
+def _jobs(data, tally) -> JobSummary:
+    """The optional jobs section. Rows with a bad state are refused with the file (no identity
+    to drop by); a bad count is repaired to 0 like any typed number."""
+    out, _ = _check(JobSummary, data, {**_JOB_COUNTS, "rows": lambda v: None}, tally)
+    rows = out["rows"]
+    if type(rows) is not list or len(rows) > _MAX_JOB_ROWS:
+        raise TypeError("bad job rows")
+    return JobSummary(**{**out, "rows": [_build(JobRow, r, tally) for r in rows]})
+
+
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
 _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
@@ -323,6 +347,7 @@ _SPEC = {
         "load": _float, "mem": _float, "disk": _float,
     },
     SourceHealth: {"name": _health_name, "status": _status, "last_ok": _float, "error": _str},
+    JobRow: {"state": _job_state, "age": _float, "kind": _str, "phase": _str, "title": _str},
 }
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
@@ -503,6 +528,8 @@ def _snapshot(doc, tally) -> Snapshot:
         raise ValueError("unsupported version")
     old = version == OLD_SNAPSHOT_VERSION
     want = {f.name for f in fields(Snapshot)} | {"llm"}
+    if "jobs" not in doc:
+        want.discard("jobs")  # omitted when no jobs source ran
     if old:
         want -= {"llms"}
     if set(doc) != want:
@@ -524,6 +551,7 @@ def _snapshot(doc, tally) -> Snapshot:
         runners=_list(Runner, doc["runners"], tally),
         quota=doc["quota"],
         health=_list(SourceHealth, doc["health"], tally),
+        jobs=_jobs(doc["jobs"], tally) if "jobs" in doc else None,
     )
 
 

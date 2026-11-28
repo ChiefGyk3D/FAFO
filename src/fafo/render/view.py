@@ -22,6 +22,7 @@ MAX_SESSIONS = 200
 MAX_CHILDREN = 256  # rows kept per session for children and for expanded helpers; the rest are counted
 MAX_GROUP_ROWS = 256
 MAX_RUNNERS = 64
+MAX_JOB_ROWS = 64
 MAX_MODELS = 32
 MAX_QUOTA = 32
 
@@ -237,6 +238,26 @@ class RunnerView:
 
 
 @dataclass
+class JobRowView:
+    state: str
+    age: str
+    kind: str
+    phase: str
+    title: str
+
+
+@dataclass
+class JobsView:
+    running: int
+    done: int
+    failed: int
+    invalid: int
+    unread: int
+    rows: list[JobRowView] = field(default_factory=list)
+    hidden: int = 0
+
+
+@dataclass
 class QuotaLine:
     name: str
     text: str
@@ -265,6 +286,7 @@ class Views:
     runners_hidden: int = 0
     quota: list[QuotaLine] = field(default_factory=list)
     banner: Banner | None = None
+    jobs: JobsView | None = None
 
 
 def _snapshot_status(
@@ -584,6 +606,7 @@ def build_views(
     ]
 
     host = _host_view(snap.host)
+    jobs = _jobs_view(snap.jobs) if snap.jobs is not None else None
     return Views(
         status=status,
         age_s=age,
@@ -600,6 +623,28 @@ def build_views(
         runners_hidden=max(0, len(snap.runners) - MAX_RUNNERS),
         quota=_quota_lines(snap.quota),
         banner=_banner(current, current_session_id),
+        jobs=jobs,
+    )
+
+
+def _jobs_view(j) -> JobsView:
+    return JobsView(
+        running=j.running,
+        done=j.done,
+        failed=j.failed,
+        invalid=j.invalid,
+        unread=j.unread,
+        rows=[
+            JobRowView(
+                state=_s(r.state, 8),
+                age=age_text(r.age),
+                kind=_s(r.kind, 24),
+                phase=_s(r.phase, 24),
+                title=_s(r.title, 60),
+            )
+            for r in j.rows[:MAX_JOB_ROWS]
+        ],
+        hidden=j.hidden,
     )
 
 

@@ -102,6 +102,8 @@ def views_to_dict(
     """JSON-safe dict of the view model. is_current is always False and banner is None."""
     doc = asdict(views)
     doc["banner"] = None
+    if doc.get("jobs") is None:
+        doc.pop("jobs", None)  # additive key: absent unless a jobs source ran
     doc["age_s"] = _finite(views.age_s)
     for node in doc["sessions"]:
         node["is_current"] = False
