@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .redact import ARGS_MODES
+from .redact import ARGS_MODES, _secret_name
 from .repospec import valid_repo
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
@@ -20,9 +20,13 @@ DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
+# Shown flags whose next token is a value to show; a shown flag not listed here is boolean.
+DEFAULT_SHOW_VALUE_ARGS = ("--model", "--resume")
+MAX_SHOW_VALUE_ARGS = 32
+_VALUE_FLAG = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9-]{0,30}")
 TOP_KEYS = {
-    "snapshot_path", "show_args", "args_mode", "sources", "aliases", "collapse_helpers",
-    "boring_procs",
+    "snapshot_path", "show_args", "show_value_args", "args_mode", "sources", "aliases",
+    "collapse_helpers", "boring_procs",
 }
 DEFAULT_BORING_PROCS = (
     "sleep", "tail", "bash", "sh", "zsh", "dash", "cat", "head", "wc", "grep", "timeout",
@@ -76,6 +80,7 @@ class Config:
     collapse_helpers: bool = True
     boring_procs: tuple[str, ...] = DEFAULT_BORING_PROCS
     args_mode: str = "allowlist"
+    show_value_args: frozenset[str] = frozenset(DEFAULT_SHOW_VALUE_ARGS)
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
     _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
@@ -350,6 +355,18 @@ def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
     return lowered
 
 
+def _parse_show_value_args(value: object) -> frozenset[str]:
+    name = "'show_value_args'"
+    if not isinstance(value, list) or len(value) > MAX_SHOW_VALUE_ARGS:
+        raise _bad(name, f"must be a list of at most {MAX_SHOW_VALUE_ARGS} flag names")
+    for item in value:
+        if not isinstance(item, str) or _VALUE_FLAG.fullmatch(item) is None:
+            raise _bad(name, "must contain only flag names (one or two dashes, then a letter and up to 30 more)")
+        if _secret_name(item.lstrip("-")):
+            raise _bad(name, "must not contain flags with credential-like names: their values are never shown")
+    return frozenset(value)
+
+
 def _parse_helpers(data: dict) -> tuple[bool, tuple[str, ...]]:
     collapse = data.get("collapse_helpers", True)
     if not isinstance(collapse, bool):
@@ -394,7 +411,12 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
 
+    show_value = _parse_show_value_args(
+        data.get("show_value_args", list(DEFAULT_SHOW_VALUE_ARGS))
+    )
+
     collapse_helpers, boring_procs = _parse_helpers(data)
+
     args_mode = data.get("args_mode", "allowlist")
     if not isinstance(args_mode, str) or args_mode not in ARGS_MODES:
         raise ConfigError("'args_mode' must be \"allowlist\" or \"safe\"")
@@ -415,6 +437,7 @@ def load_config(path: Path | None) -> Config:
         collapse_helpers=collapse_helpers,
         boring_procs=boring_procs,
         args_mode=args_mode,
+        show_value_args=show_value,
         _alias_re=_compile_aliases(aliases),
         _alias_map=alias_map,
     )
