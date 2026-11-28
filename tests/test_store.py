@@ -1209,3 +1209,62 @@ def test_written_file_never_exceeds_the_cap(tmp_path):
         write_snapshot(p, _big_snapshot(n))
         assert p.stat().st_size <= store.MAX_SNAPSHOT_BYTES
         assert read_snapshot(p) is not None
+
+
+# ---- non-row data over the cap is shrunk, or the previous file is kept ----
+
+def _no_rows(snap: Snapshot) -> Snapshot:
+    snap.procs, snap.runners = [], []
+    return snap
+
+
+def _heavy(kind: str) -> Snapshot:
+    snap = _no_rows(make_snapshot())
+    big = "x" * (5 * 1024 * 1024)
+    if kind == "host":
+        snap.host = {"disks": [{"mount": f"/m{i}", "note": "d" * 2000} for i in range(3000)]}
+    elif kind == "quota":
+        snap.quota = {"claude": {f"w{i}": "q" * 2000 for i in range(3000)}}
+    elif kind == "session":
+        snap.sessions[0].task = big
+    elif kind == "llm":
+        snap.llms[0].models = [LoadedModel("m" * 2000, 1, 1, 1.0) for _ in range(3000)]
+        snap.llms[0].gpu = {"cards": ["g" * 2000 for _ in range(3000)]}
+    elif kind == "health":
+        snap.health[0].error = big
+    return snap
+
+
+@pytest.mark.parametrize("kind", ["host", "quota", "session", "llm", "health"])
+def test_oversized_non_row_data_is_shrunk_and_the_file_reads(tmp_path, caplog, kind):
+    p = tmp_path / "snap.json"
+    snap = _heavy(kind)
+    assert len(store._encode(store.plain_copy(snap)[0])) > store.MAX_SNAPSHOT_BYTES
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(p, snap)
+    assert p.stat().st_size <= store.MAX_SNAPSHOT_BYTES
+    got = read_snapshot(p)
+    assert got is not None and got.sessions[0].pid == 42
+    assert "xxxxx" not in caplog.text and "ddddd" not in caplog.text
+
+
+def test_impossible_snapshot_keeps_the_previous_good_file(tmp_path, caplog, monkeypatch):
+    p = tmp_path / "snap.json"
+    good = make_snapshot()
+    write_snapshot(p, good)
+    before = p.read_bytes()
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 300)  # smaller than any valid document
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(p, _no_rows(make_snapshot(2000.0)))  # must not raise
+    assert p.read_bytes() == before
+    monkeypatch.undo()
+    assert read_snapshot(p) == good
+    assert "kept the previous file" in caplog.text and "demo" not in caplog.text
+    assert [x.name for x in tmp_path.iterdir()] == ["snap.json"]  # no temp file left
+
+
+def test_impossible_snapshot_with_no_previous_file_writes_nothing(tmp_path, monkeypatch):
+    p = tmp_path / "snap.json"
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 300)
+    write_snapshot(p, _no_rows(make_snapshot()))
+    assert not p.exists()

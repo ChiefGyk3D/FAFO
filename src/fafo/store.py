@@ -101,6 +101,13 @@ def write_snapshot(
     payload = _encode(plain)
     if len(payload) > MAX_SNAPSHOT_BYTES:
         payload = _trim_to_fit(plain)
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        # Nothing left to shrink: the reader would refuse this file, so keep the last good one.
+        _log.warning(
+            "snapshot: still %d bytes over the %d byte cap after shrinking; kept the previous file",
+            len(payload) - MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_BYTES,
+        )
+        return
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -152,7 +159,61 @@ def _trim_to_fit(plain: dict) -> bytes:
         else:
             lo = mid + 1
     _log.warning("snapshot: trimmed %d rows to fit", hi)
-    return build(hi)
+    payload = build(hi)
+    if len(payload) <= MAX_SNAPSHOT_BYTES:
+        return payload
+    # Rows are gone and the rest is still too big: shrink the sections that cannot be dropped.
+    base = dict(plain)
+    base["procs"] = []
+    base["runners"] = []
+    for passes, (items, chars) in enumerate(_SHRINK_PASSES, 1):
+        doc = _shrink_doc(base, items, chars)
+        payload = _encode(doc)
+        if len(payload) <= MAX_SNAPSHOT_BYTES:
+            _log.warning("snapshot: shrank non-row data in %d passes", passes)
+            return payload
+    return payload
+
+
+# (list and mapping entries kept, string characters kept) per pass, mildest first. A fixed number
+# of passes, each one re-encoded: the work is bounded however hostile the input.
+_SHRINK_PASSES = ((256, 2048), (64, 512), (16, 128), (4, 32), (1, 16))
+
+
+def _shrink_value(v, items: int, chars: int, depth: int = 0):
+    """Copy of a plain JSON value with long lists, mappings and strings cut. Depth is already
+    capped by plain_copy; the guard here keeps the walk bounded regardless."""
+    if depth > 40:
+        return None
+    if type(v) is str:
+        return v[:chars]
+    if type(v) is list:
+        return [_shrink_value(x, items, chars, depth + 1) for x in v[:items]]
+    if type(v) is dict:
+        out = {}
+        for k, x in list(v.items())[:items]:
+            out[k[:chars]] = _shrink_value(x, items, chars, depth + 1)
+        return out
+    return v
+
+
+def _shrink_doc(plain: dict, items: int, chars: int) -> dict:
+    """Shrink every section the writer never drops (host, quota, gpu, llms, sessions, health)."""
+    doc = dict(plain)
+    doc["host"] = _shrink_value(plain["host"], items, chars)
+    doc["quota"] = _shrink_value(plain["quota"], items, chars)
+    doc["llms"] = [
+        {
+            **{k: _shrink_value(v, items, chars) for k, v in srv.items()},
+            "models": [_shrink_value(m, items, chars) for m in srv["models"][:items]],
+            "inflight": [_shrink_value(m, items, chars) for m in srv["inflight"][:items]],
+        }
+        for srv in plain["llms"]
+    ]
+    doc["llm"] = doc["llms"][0] if doc["llms"] else None
+    doc["sessions"] = [_shrink_value(x, items, chars) for x in plain["sessions"]]
+    doc["health"] = [_shrink_value(x, items, chars) for x in plain["health"]]
+    return doc
 
 
 _MAX_NAME = 100  # longest identity name kept (LLM server and health row names)
