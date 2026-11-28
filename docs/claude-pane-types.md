@@ -7,6 +7,8 @@ on a developer machine, so a CI runner cannot read it; the copy is
 and the copy date. The check is the `Pane mod type-check` job in `.github/workflows/ci.yml`,
 and `CI green` needs it.
 
+The job runs with `step-security/harden-runner` in `block` mode; its allow-list is `github.com`, `api.github.com`, `registry.npmjs.org` and the runner results receiver, so a new host needs an entry in `ci.yml`.
+
 ## Run it
 
 ```
