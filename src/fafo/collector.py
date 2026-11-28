@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any, get_args
 
 from .config import Config, SourceCfg
-from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
+from .model import MAX_LLM_SERVERS, SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
 from .redact import mask_credentials, sanitize_text
 from .render.export import write_views
-from .render.view import build_views
+from .render.view import build_views, policy_from_config
 from .source import Ctx, Source, SourceResult
 from .store import write_snapshot
 
@@ -281,10 +281,10 @@ class Collector:
             snap.sessions.extend(res.sessions)
             snap.procs.extend(res.procs)
             snap.runners.extend(res.runners)
-            if snap.llm is None and res.llm is not None:
-                snap.llm = res.llm
+            snap.llms.extend(res.llms or ([res.llm] if res.llm is not None else []))
             snap.host.update(res.host)
             snap.quota.update(res.quota)
+        del snap.llms[MAX_LLM_SERVERS:]
         return snap
 
     def run(self) -> None:
@@ -311,7 +311,8 @@ class Collector:
         """Write views.json from the snapshot just written. Never raises; logs no values."""
         try:
             now = self._clock()
-            write_views(self._views_path, build_views(snap, now), snapshot=snap, generated=now)
+            views = build_views(snap, now, helpers=policy_from_config(self._cfg))
+            write_views(self._views_path, views, snapshot=snap, generated=now)
         except Exception as exc:  # noqa: BLE001 - views are optional, the snapshot is not
             self.views_write_failures += 1
             n = self.views_write_failures

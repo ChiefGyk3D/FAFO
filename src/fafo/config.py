@@ -25,13 +25,15 @@ DEFAULT_SHOW_VALUE_ARGS = ("--model", "--resume")
 MAX_SHOW_VALUE_ARGS = 32
 _VALUE_FLAG = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9-]{0,30}")
 TOP_KEYS = {
-    "snapshot_path",
-    "show_args",
-    "show_value_args",
-    "args_mode",
-    "sources",
-    "aliases",
+    "snapshot_path", "show_args", "show_value_args", "args_mode", "sources", "aliases",
+    "collapse_helpers", "boring_procs",
 }
+DEFAULT_BORING_PROCS = (
+    "sleep", "tail", "bash", "sh", "zsh", "dash", "cat", "head", "wc", "grep", "timeout",
+    "env", "true",
+)
+MAX_BORING = 64
+_PROC_NAME = re.compile(r"[A-Za-z0-9._-]{1,32}")
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
 TASK_LABEL_MODES = ("off", "activity", "prompt")
 SECRET_WORDS = ("token", "password", "secret", "key")
@@ -39,7 +41,7 @@ SECRET_WORDS = ("token", "password", "secret", "key")
 # Source-specific option keys, per source. Anything else is an unknown key.
 OPTION_KEYS: dict[str, frozenset[str]] = {
     "claude": frozenset({"sessions_dir", "task_labels"}),
-    "ollama": frozenset({"url", "admission_log"}),
+    "ollama": frozenset({"url", "admission_log", "servers"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
 }
@@ -48,8 +50,11 @@ MAX_PATH_LEN = 4096
 MAX_URL_LEN = 2048
 MAX_LIST = 100
 MAX_HOSTS = 32
+MAX_OLLAMA_SERVERS = 8
+SERVER_KEYS = frozenset({"name", "url", "admission_log"})
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 _LABEL = re.compile(r"[A-Za-z0-9._@-]{1,100}")  # host name and ssh alias (same as sshro)
+_SERVER_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 _PEM_MARK = "-----" + "BEGIN"
 
 
@@ -72,6 +77,8 @@ class Config:
     aliases: dict[str, str]
     snapshot_path: Path
     show_args: set[str]
+    collapse_helpers: bool = True
+    boring_procs: tuple[str, ...] = DEFAULT_BORING_PROCS
     args_mode: str = "allowlist"
     show_value_args: frozenset[str] = frozenset(DEFAULT_SHOW_VALUE_ARGS)
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
@@ -229,6 +236,33 @@ def _parse_hosts(value: object) -> list[dict[str, Any]]:
     return out
 
 
+def _parse_ollama_servers(value: object) -> list[dict[str, Any]]:
+    name = "sources.ollama.servers"
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_OLLAMA_SERVERS:
+        raise _bad(name, f"must be 1 to {MAX_OLLAMA_SERVERS} [[{name}]] tables")
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for s in value:
+        if not isinstance(s, dict):
+            raise _bad(name, "must be an array of tables")
+        for k in s:
+            if k not in SERVER_KEYS:
+                raise ConfigError(f"unknown key '{name}.{k}'")
+        if "name" not in s or "url" not in s:
+            raise _bad(name, "entries need a name and a url")
+        sname = s["name"]
+        if not isinstance(sname, str) or _SERVER_NAME.fullmatch(sname) is None:
+            raise _bad(f"{name}.name", "must be 1-32 characters from A-Z a-z 0-9 . _ -")
+        if sname.casefold() in seen:
+            raise _bad(name, "has a duplicate server name")
+        seen.add(sname.casefold())
+        item: dict[str, Any] = {"name": sname, "url": _opt_text(s["url"], f"{name}.url", MAX_URL_LEN)}
+        if "admission_log" in s:
+            item["admission_log"] = _opt_path(s["admission_log"], f"{name}.admission_log")
+        out.append(item)
+    return out
+
+
 def _parse_options(source: str, body: dict) -> dict[str, Any]:
     p = f"sources.{source}"
     out: dict[str, Any] = {}
@@ -250,12 +284,19 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
             out[k] = _opt_env(v, n)
         elif k == "token_file":
             out[k] = _opt_abs_path(v, n)
+        elif k == "servers":
+            out[k] = _parse_ollama_servers(v)
         elif k == "hosts":
             out[k] = _parse_hosts(v)
         elif k == "session_paths":
             if not isinstance(v, list) or len(v) > MAX_LIST:
                 raise _bad(n, f"must be a list of at most {MAX_LIST} strings")
             out[k] = [_opt_text(x, n, 200) for x in v]
+    if "servers" in out and ("url" in out or "admission_log" in out):
+        raise _bad(
+            f"{p}.servers",
+            "cannot be combined with url or admission_log; give each server its own",
+        )
     return out
 
 
@@ -326,6 +367,22 @@ def _parse_show_value_args(value: object) -> frozenset[str]:
     return frozenset(value)
 
 
+def _parse_helpers(data: dict) -> tuple[bool, tuple[str, ...]]:
+    collapse = data.get("collapse_helpers", True)
+    if not isinstance(collapse, bool):
+        raise _bad("collapse_helpers", "must be true or false")
+    raw = data.get("boring_procs", list(DEFAULT_BORING_PROCS))
+    if not isinstance(raw, list) or len(raw) > MAX_BORING:
+        raise _bad("boring_procs", f"must be a list of at most {MAX_BORING} program names")
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or _PROC_NAME.fullmatch(item) is None:
+            raise _bad("boring_procs", "must contain only names of 1-32 characters from A-Z a-z 0-9 . _ -")
+        if item not in names:
+            names.append(item)
+    return collapse, tuple(names)
+
+
 def load_config(path: Path | None) -> Config:
     data: dict = {}
     if path is not None:
@@ -358,6 +415,8 @@ def load_config(path: Path | None) -> Config:
         data.get("show_value_args", list(DEFAULT_SHOW_VALUE_ARGS))
     )
 
+    collapse_helpers, boring_procs = _parse_helpers(data)
+
     args_mode = data.get("args_mode", "allowlist")
     if not isinstance(args_mode, str) or args_mode not in ARGS_MODES:
         raise ConfigError("'args_mode' must be \"allowlist\" or \"safe\"")
@@ -375,6 +434,8 @@ def load_config(path: Path | None) -> Config:
         aliases=dict(aliases),
         snapshot_path=snapshot_path,
         show_args=set(show),
+        collapse_helpers=collapse_helpers,
+        boring_procs=boring_procs,
         args_mode=args_mode,
         show_value_args=show_value,
         _alias_re=_compile_aliases(aliases),

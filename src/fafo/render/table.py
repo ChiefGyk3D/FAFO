@@ -14,6 +14,7 @@ from .view import (
     SessionNode,
     Views,
     age_text,
+    helper_summary,
     snapshot_status,
 )
 
@@ -169,6 +170,8 @@ def format_table(views: Views, width: int = 100) -> str:
         for n in views.sessions:
             items.append(_session_row(n))
             items += [_proc_row(c, 2) for c in n.children]
+            if n.collapsed:
+                items.append("    " + helper_summary(n.collapsed, n.collapsed_names))
             if n.children_hidden:
                 items.append(f"    +{n.children_hidden} more processes")
         if views.sessions_hidden:
@@ -186,21 +189,25 @@ def format_table(views: Views, width: int = 100) -> str:
         lines += _grid(_S_HEAD, items, _S_PRIO, {"TASK"}, width)
 
     stale_age = age_text(views.age_s)
-    if views.llm is not None:
-        llm = views.llm
+    if views.llms:
         lines.append("")
         lines.append("LOCAL LLM")
-        mark = f" ~{stale_age}" if llm.stale else ""
-        for m in llm.models:
-            lines.append(f"  {m.name}  {m.vram}  ctx {m.context}  exp {m.expires}{mark}")
-        if llm.models_hidden:
-            lines.append(f"  +{llm.models_hidden} more models")
-        if not llm.models:
-            lines.append("  no model loaded")
-        gpu = f"  gpu {llm.gpu}" if llm.gpu else ""
-        lines.append(f"  queue {llm.queue}  in-flight {len(llm.inflight)}{gpu}")
-        for i in llm.inflight:
-            lines.append(f"  in-flight {i.model}  session {i.session}")
+        for llm in views.llms:
+            mark = f" ~{llm.age}" if llm.stale else ""
+            if llm.label:
+                lines.append(f"  server {llm.name}{mark}")
+            for m in llm.models:
+                lines.append(f"  {m.name}  {m.vram}  ctx {m.context}  exp {m.expires}{mark}")
+            if llm.models_hidden:
+                lines.append(f"  +{llm.models_hidden} more models")
+            if not llm.models:
+                lines.append("  no model loaded")
+            gpu = f"  gpu {llm.gpu}" if llm.gpu else ""
+            lines.append(f"  queue {llm.queue}  in-flight {len(llm.inflight)}{gpu}")
+            for i in llm.inflight:
+                lines.append(f"  in-flight {i.model}  session {i.session}")
+        if views.llms_hidden:
+            lines.append(f"  +{views.llms_hidden} more servers")
 
     if views.runners:
         lines.append("")
@@ -239,13 +246,14 @@ def _snapshot_doc(snap: Snapshot) -> dict:
         snap,
         host={},
         quota={},
-        llm=None if snap.llm is None else dataclasses.replace(snap.llm, gpu={}),
+        llms=[dataclasses.replace(s, gpu={}) for s in snap.llms],
     )
     doc = asdict(shell)
     doc["host"] = finite_copy(snap.host)
     doc["quota"] = finite_copy(snap.quota)
-    if snap.llm is not None:
-        doc["llm"]["gpu"] = finite_copy(snap.llm.gpu)
+    for copy, server in zip(doc["llms"], snap.llms):
+        copy["gpu"] = finite_copy(server.gpu)
+    doc["llm"] = doc["llms"][0] if doc["llms"] else None  # first server, for older readers
     return doc
 
 

@@ -180,6 +180,10 @@ function bodyLines(views: Views, ownId: string | null, w: number): Line[] {
     if (s.childrenHidden > 0) {
       out.push({ text: fit(`    +${s.childrenHidden} more`, w), dim: true })
     }
+    if (s.collapsed > 0) {
+      const names = s.collapsedNames.length > 0 ? ` (${s.collapsedNames.join(', ')})` : ''
+      out.push({ text: fit(`    +${s.collapsed} helpers${names}`, w), dim: true })
+    }
   }
   if (all.length > 0) out.push({ text: fit('SESSIONS', w), bold: true })
   for (const s of all) session(s)
@@ -199,10 +203,10 @@ function bodyLines(views: Views, ownId: string | null, w: number): Line[] {
 
 function extraLines(views: Views, w: number): Line[] {
   const out: Line[] = []
-  const l = views.llm
-  if (l) {
+  for (const l of views.llms) {
     const head = [
-      'LLM',
+      l.label && l.name ? `LLM ${l.name}` : 'LLM',
+      l.stale && l.age ? `last good ${l.age}` : '',
       l.queue === null ? '' : `queue ${l.queue}`,
       `in-flight ${l.inflight}`,
       l.gpu ? `gpu ${l.gpu}` : '',

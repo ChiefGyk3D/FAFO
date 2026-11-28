@@ -76,6 +76,19 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
+dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds (so 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
+
+Helper processes: a session that runs many short helpers (`sleep`, `tail`, shells) would fill
+the screen, so the table, the terminal UI and the Claude pane show one summary row per session,
+for example `+16 helpers (sleep x6, bash x4, cat x3)` (the count is exact, the three most common
+names are listed). A helper stays visible when it uses 5 percent CPU or more, or when a process
+that is not boring runs below it. Set `collapse_helpers = false` to turn this off, or change the
+`boring_procs` list (program basenames, at most 64 of 1-32 characters from `A-Za-z0-9._-`).
+In the terminal UI, Enter or `x` on the summary row shows the full list for that session and
+toggles it back; the session screen always lists every process. The pane reads `collapsed` and
+`collapsed_names` from `views.json` (additive fields, schema unchanged).
+
 ### Task labels
 
 The TASK column of a Claude session shows what it is doing. By default (`task_labels =
@@ -89,10 +102,16 @@ sensitive prose, on screen and in screenshots. Use it only if you are comfortabl
 
 ### Snapshot compatibility
 
+The snapshot is strict JSON with a version number. Version 2 (current) adds `llms`, the list of
+local LLM servers (each with `name`, `last_ok` and `reachable`), and keeps `llm`, a copy of the
+first server. FAFO still reads version 1 files (one `llm`, no names; it becomes one server named
+`ollama`). An older FAFO that only knows version 1 refuses a version 2 file by design (strict
+version and key checks), so run the collector and the readers from the same release.
+
 An idle session shows its last-known repo with a trailing `~`. The snapshot records that in a
-per-session `project_source` key, written only when it is not `live`. A snapshot with no such
-session has the same keys as before. A snapshot that does contain one is refused by older FAFO
-readers by design: the snapshot schema is strict, and the version number is not bumped for this.
+per-session `project_source` key, written only when it is not `live`, under either version. A
+snapshot with no such session has the same session keys as before. A snapshot that does contain
+one is refused by readers that predate the key, because the schema is strict.
 
 ### Security notes
 

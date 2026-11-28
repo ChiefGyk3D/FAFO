@@ -8,12 +8,14 @@ down while keeping the previous rows. An unreadable admission log is not an erro
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
 import stat
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,11 +23,30 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..model import Inflight, LlmServer, LoadedModel
+from ..collector import backoff_delay
+from ..model import DEFAULT_LLM_NAME, MAX_LLM_SERVERS, Inflight, LlmServer, LoadedModel
 from ..redact import sanitize_text
 from ..source import Ctx, SourceResult
 
-TIMEOUT_S = 3.0
+TIMEOUT_S = 3.0  # most one request may take (default_http_get enforces it)
+# One server's whole poll (/api/ps then /api/version) shares ONE deadline, measured on the
+# injected clock: poll_deadline(timeout_s) = min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s -
+# WAIT_MARGIN_S)), where timeout_s is the source's own timeout from its config (the collector
+# abandons collect() after that long). Servers are polled in parallel, so collect() takes at most
+# that deadline, always inside the outer timeout. Each request gets min(TIMEOUT_S, time left), at
+# least MIN_REQUEST_S; a request is not started once the time is spent. After the wait the worker
+# thread is abandoned.
+POLL_DEADLINE_S = 2 * TIMEOUT_S  # ceiling
+MIN_POLL_S = 0.5  # floor, for a tiny configured timeout
+MIN_REQUEST_S = 0.2
+WAIT_MARGIN_S = 0.5  # kept free of the outer timeout
+
+
+def poll_deadline(timeout_s: float) -> float:
+    """Seconds one server's whole poll may take for a source timeout of timeout_s."""
+    return min(POLL_DEADLINE_S, max(MIN_POLL_S, timeout_s - WAIT_MARGIN_S))
+
+
 MAX_BODY = 256 * 1024
 MAX_DEPTH = 16
 MAX_MODELS = 64
@@ -242,28 +263,89 @@ def _admission(path: Path | None) -> tuple[int, list[Inflight]]:
     return queue, list(inflight.values())[:MAX_MODELS]
 
 
+@dataclass(frozen=True)
+class ServerSpec:
+    """One server to poll: a label, a base URL and an optional admission log."""
+
+    name: str
+    url: str
+    admission_log: Path | None = None
+
+
+@dataclass
+class _Server:
+    """A server and its own health: last good rows, failure count, next allowed poll."""
+
+    spec: ServerSpec
+    url: str  # validated, no trailing slash
+    last: LlmServer | None = None
+    failures: int = 0
+    next_try: float = 0.0
+    error: Exception | None = None
+    worker: threading.Thread | None = None  # the last poll thread; abandoned when it hangs
+    done: threading.Event | None = None
+    box: dict | None = None  # that thread's result: "r" (LlmServer) or "e" (Exception)
+
+
 class OllamaSource:
+    """Polls every configured server, each with its own backoff, in parallel.
+
+    One server failing never blanks the others: its last good rows are kept and flagged
+    unreachable (their last_ok stays old, so they age), and the rest stay fresh. Only when
+    every server fails in the same call does collect() raise, as a single server always did,
+    so the collector marks the source down and keeps the previous rows.
+    """
+
     name = "ollama"
 
     def __init__(
         self,
-        url: str,
+        url: str | None = None,
         admission_log: Path | None = None,
         http: HttpGet | None = None,
+        *,
+        servers: Sequence[ServerSpec] | None = None,
     ) -> None:
-        self._url = _check_url(url)
-        self._log = admission_log
+        if servers is None:
+            if url is None:
+                raise ValueError("ollama: a url or servers is needed")
+            servers = [ServerSpec(DEFAULT_LLM_NAME, url, admission_log)]
+        if not 1 <= len(servers) <= MAX_LLM_SERVERS:
+            raise ValueError(f"ollama: 1 to {MAX_LLM_SERVERS} servers")
+        names = [s.name.casefold() for s in servers]
+        if len(set(names)) != len(names):
+            raise ValueError("ollama: duplicate server name")
+        self._servers = [_Server(s, _check_url(s.url)) for s in servers]
         self._http: HttpGet = http or default_http_get
 
-    def _get(self, path: str) -> object:
-        resp = self._http(self._url + path, TIMEOUT_S, MAX_BODY)
+    @property
+    def servers(self) -> list[ServerSpec]:
+        return [s.spec for s in self._servers]
+
+    @property
+    def _url(self) -> str:
+        return self._servers[0].url
+
+    @property
+    def _log(self) -> Path | None:
+        return self._servers[0].spec.admission_log
+
+    def _get(self, base: str, path: str, deadline: float, clock: Callable[[], float]) -> object:
+        left = deadline - clock()
+        if left <= 0:
+            raise TimeoutError("ollama poll deadline spent")
+        resp = self._http(base + path, min(TIMEOUT_S, max(left, MIN_REQUEST_S)), MAX_BODY)
         if resp.status != 200:
             raise RuntimeError(f"ollama {path}: HTTP {resp.status}")
         return _parse_json(resp.body)
 
-    def collect(self, ctx: Ctx) -> SourceResult:
-        data = self._get("/api/ps")
-        self._get("/api/version")
+    def _poll_one(
+        self, srv: _Server, clock: Callable[[], float], budget: float
+    ) -> LlmServer:
+        start = clock()
+        deadline = start + budget
+        data = self._get(srv.url, "/api/ps", deadline, clock)
+        self._get(srv.url, "/api/version", deadline, clock)
         listed = data.get("models") if isinstance(data, dict) else None
         if not isinstance(listed, list):
             raise TypeError("ollama /api/ps: unexpected shape")
@@ -274,5 +356,80 @@ class OllamaSource:
                 models.append(m)
             if len(models) >= MAX_MODELS:
                 break
-        queue, inflight = _admission(self._log)
-        return SourceResult(llm=LlmServer(models=models, queue=queue, inflight=inflight, gpu={}))
+        queue, inflight = _admission(srv.spec.admission_log)
+        return LlmServer(
+            models=models, queue=queue, inflight=inflight, gpu={},
+            name=srv.spec.name, last_ok=start, reachable=True,
+        )
+
+    def _start(self, srv: _Server, clock: Callable[[], float], budget: float) -> None:
+        """One daemon thread per server per collect; its result goes in its own box."""
+        box: dict = {}
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                box["r"] = self._poll_one(srv, clock, budget)
+            except BaseException as exc:  # noqa: BLE001 - a poll must never kill the thread silently
+                box["e"] = exc
+            finally:
+                done.set()
+
+        srv.box, srv.done = box, done
+        srv.worker = threading.Thread(
+            target=run, daemon=True, name=f"fafo-ollama-{srv.spec.name}"
+        )
+        srv.worker.start()
+
+    def _fail(self, srv: _Server, exc: Exception, now: float, interval: float) -> None:
+        srv.failures += 1
+        srv.error = exc
+        srv.next_try = now + backoff_delay(interval, srv.failures)
+
+    def collect(self, ctx: Ctx) -> SourceResult:
+        now = ctx.clock()
+        interval = ctx.cfg.interval_s
+        budget = poll_deadline(ctx.cfg.timeout_s)
+        polled: list[_Server] = []
+        for srv in self._servers:
+            if srv.worker is not None and srv.worker.is_alive() and not (
+                srv.done is not None and srv.done.is_set()
+            ):
+                # An abandoned poll is still hung: no second thread for this server.
+                self._fail(srv, TimeoutError("previous poll still running"), now, interval)
+                continue
+            if now < srv.next_try:
+                continue  # backing off: keep its last rows, poll the others
+            self._start(srv, ctx.clock, budget)
+            polled.append(srv)
+        end = time.monotonic() + budget
+        for srv in polled:
+            if srv.done is not None:
+                srv.done.wait(max(0.0, end - time.monotonic()))
+        for srv in polled:
+            box = srv.box or {}
+            if srv.done is None or not srv.done.is_set():
+                # Abandoned: its late result goes into the old box and is never read.
+                self._fail(srv, TimeoutError("ollama poll timed out"), now, interval)
+            elif "r" in box:
+                srv.last = box["r"]
+                srv.failures = 0
+                srv.error = None
+                srv.next_try = 0.0
+            else:
+                exc = box.get("e")
+                self._fail(srv, exc if isinstance(exc, Exception) else RuntimeError("poll failed"),
+                           now, interval)
+        errors = [s.error for s in self._servers if s.error is not None]
+        if len(errors) == len(self._servers):
+            raise errors[0]
+        rows = []
+        for srv in self._servers:
+            if srv.last is None:
+                rows.append(LlmServer([], 0, [], {}, name=srv.spec.name, reachable=False))
+            elif srv.error is not None:
+                rows.append(dataclasses.replace(srv.last, reachable=False))
+            else:
+                rows.append(srv.last)
+        down = any(s.error is not None for s in self._servers)
+        return SourceResult(llms=rows, llm=rows[0], status="stale" if down else None)

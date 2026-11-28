@@ -322,6 +322,23 @@ def test_existing_directory_mode_untouched(tmp_path):
     assert stat.S_IMODE(os.stat(d).st_mode) == before
 
 
+def test_views_json_carries_llms_and_keeps_llm_as_the_first(tmp_path):
+    from fafo.model import LlmServer, LoadedModel
+
+    s = snap(1)
+    s.llms = [
+        LlmServer([LoadedModel("m-a", 1, 1, 0.0)], 0, [], {}, name="alpha", last_ok=NOW),
+        LlmServer([], 2, [], {}, name="beta", last_ok=0.0, reachable=False),
+    ]
+    path = tmp_path / "views.json"
+    write_views(path, build_views(s, NOW), generated=NOW)
+    doc = json.loads(path.read_text())
+    assert doc["schema"] == 2
+    assert [x["name"] for x in doc["llms"]] == ["alpha", "beta"]
+    assert doc["llms"][1]["stale"] is True and doc["llm"]["name"] == "alpha"
+    assert doc["llm"]["models"][0]["name"] == "m-a"
+
+
 def test_views_json_carries_source_and_tilde_label():
     sn = snap(2)
     sn.sessions[0].project_source = "last"

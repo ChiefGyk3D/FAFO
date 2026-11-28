@@ -1,8 +1,15 @@
 """Atomic, owner-only snapshot file. Readers see the old file or the new one, never a mix.
 
-Strict schema: a session's `project_source` key is written only when it is not "live". The reader
-accepts both forms, but an older reader refuses a snapshot that contains a last-known or folder
-project (it rejects unknown keys) by design; SNAPSHOT_VERSION is deliberately not bumped for this.
+Strict schema, SNAPSHOT_VERSION 2. Version 2 adds `llms` (a list of local LLM servers, each with
+`name`, `last_ok` and `reachable`) and still writes `llm`, a copy of the first server, for readers
+that look at that key. The reader accepts version 1 (no `llms`; its `llm` becomes one server named
+"ollama") and version 2, where `llm` must equal `llms[0]`; any other version, or a version 1 file
+with `llms`, is refused. A reader that only knows version 1 refuses a version 2 file (it checks the
+version and rejects unknown keys), by design.
+
+A session's `project_source` key is written only when it is not "live", under either version. The
+reader accepts both forms; a reader that predates the key refuses a snapshot that contains a
+last-known or folder project (it rejects unknown keys) by design.
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ from typing import get_args
 
 from .jsonsafe import MAX_INT_BITS, check_finite, plain_copy
 from .model import (
+    MAX_LLM_SERVERS,
+    OLD_SNAPSHOT_VERSION,
     SNAPSHOT_VERSION,
     Inflight,
     LlmServer,
@@ -83,6 +92,7 @@ def write_snapshot(
     if replaced:
         _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
     _omit_default_source(plain)
+    plain["llm"] = plain["llms"][0] if plain["llms"] else None  # first server, for older readers
     payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -203,36 +213,82 @@ def _session_list(data) -> list[Session]:
     return [_session(item) for item in data]
 
 
-def _llm(data) -> LlmServer | None:
+_LLM_NEW = {"name": "ollama", "last_ok": 0.0, "reachable": True}  # absent in version 1
+_MAX_LLM_NAME = 100
+
+
+def _name(v):
+    if type(v) is not str or not 0 < len(v) <= _MAX_LLM_NAME:
+        raise TypeError("bad server name")
+
+
+def _bool(v):
+    if type(v) is not bool:
+        raise TypeError("expected bool")
+
+
+def _llm(data, *, old: bool = False) -> LlmServer | None:
     if data is None:
         return None
-    _check(LlmServer, data, {"queue": _int, "gpu": _dict})
+    if old and type(data) is dict:
+        data = {**_LLM_NEW, **data}
+    _check(
+        LlmServer, data,
+        {"queue": _int, "gpu": _dict, "name": _name, "last_ok": _float, "reachable": _bool},
+    )
     return LlmServer(
         models=_list(LoadedModel, data["models"]),
         queue=data["queue"],
         inflight=_list(Inflight, data["inflight"]),
         gpu=data["gpu"],
+        name=data["name"],
+        last_ok=data["last_ok"],
+        reachable=data["reachable"],
     )
+
+
+def _llms(doc, old: bool) -> list[LlmServer]:
+    """Version 1 has only "llm" (one server, no name). Version 2 has "llms" and "llm", and the
+    two must agree: "llm" is a copy of the first server kept for older readers."""
+    first = _llm(doc["llm"], old=old)
+    if old:
+        return [] if first is None else [first]
+    raw = doc["llms"]
+    if type(raw) is not list or len(raw) > MAX_LLM_SERVERS:
+        raise TypeError("bad llms")
+    servers: list[LlmServer] = []
+    for item in raw:
+        s = _llm(item)
+        if s is None:
+            raise TypeError("null server in llms")
+        servers.append(s)
+    if first != (servers[0] if servers else None):
+        raise TypeError("llm does not match llms")
+    return servers
 
 
 def _snapshot(doc) -> Snapshot:
     if not isinstance(doc, dict):
         raise TypeError("expected object")
     version = doc.get("version")
-    if type(version) is not int or version != SNAPSHOT_VERSION:
+    if type(version) is not int or version not in (OLD_SNAPSHOT_VERSION, SNAPSHOT_VERSION):
         raise ValueError("unsupported version")
-    if set(doc) != {f.name for f in fields(Snapshot)}:
+    old = version == OLD_SNAPSHOT_VERSION
+    want = {f.name for f in fields(Snapshot)} | {"llm"}
+    if old:
+        want -= {"llms"}
+    if set(doc) != want:
         raise TypeError("field mismatch")
     _float(doc["taken"])
     _dict(doc["host"])
     _dict(doc["quota"])
     return Snapshot(
-        version=version,
+        version=SNAPSHOT_VERSION,
         taken=doc["taken"],
         host=doc["host"],
         sessions=_session_list(doc["sessions"]),
         procs=_list(Proc, doc["procs"]),
-        llm=_llm(doc["llm"]),
+        llms=_llms(doc, old),
         runners=_list(Runner, doc["runners"]),
         quota=doc["quota"],
         health=_list(SourceHealth, doc["health"]),

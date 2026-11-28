@@ -209,6 +209,28 @@ test('own session is first with a marker, children indented under their session'
   await ui.unmount()
 })
 
+test('collapsed helpers show as one summary row under their session', async ($, on) => {
+  const sessions = [
+    node(1, { collapsed: 16, collapsed_names: ['sleep x6', 'bash x4', 'cat x3', 'tail x1', ESC + '[31m'] }),
+    node(2),
+  ]
+  await load($, on, views({ sessions }))
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  const at = all.findIndex(t => /^ {2}work-1 /.test(t))
+  expect(all[at + 1]).toMatch(/^ {4}codex exec run-1/)
+  expect(all[at + 2]).toBe('    +16 helpers (sleep x6, bash x4, cat x3)')
+  expect(all.filter(t => t.includes('helpers'))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a views file without the collapsed fields still draws', async ($, on) => {
+  await load($, on, views({ sessions: [node(1, { collapsed: 'many', collapsed_names: 'x' })] }))
+  const ui = await draw($, 120)
+  expect((await lines(ui)).some(t => t.includes('helpers'))).toBe(false)
+  await ui.unmount()
+})
+
 test('stale rows are dimmed and carry an age tag', async ($, on) => {
   await load($, on, views({ sessions: [node(1, { stale: true, age: '30s' }), node(2)] }))
   const ui = await draw($, 120)
@@ -217,6 +239,46 @@ test('stale rows are dimmed and carry an age tag', async ($, on) => {
   expect(stale?.props.dimColor).toBe(true)
   const fresh = await ui.find({ type: 'Text', text: /work-2/ })
   expect(fresh?.props.dimColor).toBe(false)
+  await ui.unmount()
+})
+
+const llmOf = (name: string, model: string, over: Record<string, unknown> = {}) => ({
+  name,
+  label: true,
+  age: '1s',
+  models: [{ name: model, vram: '4G', context: '8k', expires: '4m' }],
+  queue: 2,
+  inflight: [],
+  gpu: '',
+  stale: false,
+  ...over,
+})
+
+test('every LLM server is drawn with its own name, models and stale dimming', async ($, on) => {
+  const a = llmOf('gpu-box', 'model-a')
+  const b = llmOf('laptop', 'model-b', { stale: true, age: '2m' })
+  await load($, on, views({ llm: a, llms: [a, b] }))
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  expect(all.some(t => /^LLM gpu-box .*queue 2/.test(t))).toBe(true)
+  expect(all.some(t => /model-a/.test(t))).toBe(true)
+  const head = await ui.find({ type: 'Text', text: /^LLM laptop/ })
+  expect(head?.text).toContain('last good 2m')
+  expect(head?.props.dimColor).toBe(true)
+  const fresh = await ui.find({ type: 'Text', text: /^LLM gpu-box/ })
+  expect(fresh?.props.dimColor).toBe(false)
+  expect(all.some(t => /model-b/.test(t))).toBe(true)
+  await ui.unmount()
+})
+
+test('a file with only the old llm field still shows one LLM block', async ($, on) => {
+  const doc = views() as Record<string, unknown>
+  delete doc.llms
+  await load($, on, doc)
+  const ui = await draw($, 120)
+  const all = await lines(ui)
+  expect(all.filter(t => t.startsWith('LLM')).length).toBe(1)
+  expect(all.some(t => /model-a/.test(t))).toBe(true)
   await ui.unmount()
 })
 
@@ -266,6 +328,7 @@ test('malformed rows are ignored without throwing', async ($, on) => {
     health: 'bad',
     unattached: [{ name: 5, procs: [null], sessions: 'x' }],
     llm: 'bad',
+    llms: [1, null, 'x'],
     runners: [1, null],
     quota: [[], { name: 3 }],
   })

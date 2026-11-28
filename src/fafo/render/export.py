@@ -16,6 +16,8 @@ missing session from a hidden one: `session_index_count` (the true number of Cla
 `index_hidden` (int, count minus len(session_index)) and `session_index_truncated` (bool,
 index_hidden > 0). Schema stays 2: these keys are additions, nothing was removed or retyped.
 
+Several local LLM servers: `llms` is a list of the same objects `llm` holds, each with `name`, `label`, `age` and its own `stale`; `llms_hidden` counts servers past the cap. `llm` stays and is the first server, so a reader written before `llms` still works.
+
 SIZE RULE: the file ALWAYS fits MAX_BYTES (2 MiB), measured on the encoded bytes. The file is
 encoded with ensure_ascii=True, so it is pure ASCII and bytes equal characters, a non-ASCII
 character costs 6 bytes (12 for a character outside the BMP) and the measurement counts that.
@@ -103,9 +105,14 @@ def views_to_dict(
     doc["age_s"] = _finite(views.age_s)
     for node in doc["sessions"]:
         node["is_current"] = False
+        # The summary (collapsed, collapsed_names) stays; the folded rows are TUI-only.
+        node.pop("helpers", None)
+        node.pop("helpers_hidden", None)
     for group in doc["unattached"]:
         for node in group["sessions"]:
             node["is_current"] = False
+            node.pop("helpers", None)
+            node.pop("helpers_hidden", None)
     gen = _finite(time.time() if generated is None else generated)
     index, count = build_session_index(views, snapshot)
     return {
@@ -192,7 +199,7 @@ def encode_bounded(doc: dict) -> bytes:
     minimal.update(
         session_index=[], index_hidden=doc["session_index_count"], session_index_truncated=True,
         banner=None, health=[], host={}, sessions=[], sessions_hidden=0, unattached=[],
-        llm=None, runners=[], runners_hidden=0, quota=[],
+        llm=None, llms=[], llms_hidden=0, runners=[], runners_hidden=0, quota=[],
     )
     return _encode(minimal)
 

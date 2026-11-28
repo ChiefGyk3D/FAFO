@@ -141,7 +141,7 @@ def test_read_snapshot_deep_values_low_limit(where, text, tmp_path: Path):
     write_snapshot(path, make_snapshot())
     old = {"host": '"load":4.1', "quota": '"5h":0.41', "gpu": '"util":78'}[where]
     raw = path.read_text(encoding="utf-8")
-    assert raw.count(old) == 1
+    assert raw.count(old) == (2 if where == "gpu" else 1)  # gpu is in "llm" and "llms"
     key = old.split(":")[0]
     path.write_text(raw.replace(old, f"{key}:{text(DEEP)}"), encoding="utf-8")
     with low_recursion_limit():

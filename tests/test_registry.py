@@ -430,3 +430,35 @@ def test_bad_result_in_second_source_does_not_hide_behind_duplicate_check(tmp_pa
     f = {"codex": lambda s, c, e: Stub("codex"), "gemini": lambda s, c, e: _NameList()}
     with pytest.raises(ConfigError, match="sources.gemini"):
         build_sources(cfg, {}, factories=f)
+
+
+def test_ollama_servers_build_one_source_with_all_servers(tmp_path):
+    cfg = cfg_from(
+        tmp_path,
+        "[sources.ollama]\n"
+        '[[sources.ollama.servers]]\nname = "one"\nurl = "http://one.example.invalid:11434"\n'
+        '[[sources.ollama.servers]]\nname = "two"\nurl = "http://two.example.invalid:11434"\n'
+        'admission_log = "/var/log/example-admission.log"\n',
+    )
+    by = {s.name: s for s in build_sources(cfg, {})}
+    assert [s.name for s in by["ollama"].servers] == ["one", "two"]
+    assert by["ollama"].servers[1].url == "http://two.example.invalid:11434"
+    assert by["ollama"].servers[1].admission_log == Path("/var/log/example-admission.log")
+    assert by["ollama"].servers[0].admission_log is None
+
+
+def test_old_single_url_builds_one_server_named_ollama(tmp_path):
+    cfg = cfg_from(tmp_path, "[sources.ollama]\nurl = \"http://o.example.invalid:11434\"\n")
+    src = {s.name: s for s in build_sources(cfg, {})}["ollama"]
+    assert [s.name for s in src.servers] == ["ollama"]
+
+
+def test_bad_server_url_names_the_option_and_never_echoes_it(tmp_path):
+    cfg = cfg_from(
+        tmp_path,
+        "[sources.ollama]\n[[sources.ollama.servers]]\nname = \"a\"\n"
+        'url = "http://user:hunter2@x.invalid"\n',
+    )
+    with pytest.raises(ConfigError) as ei:
+        build_sources(cfg, {})
+    assert "sources.ollama.servers" in str(ei.value) and "hunter2" not in str(ei.value)
