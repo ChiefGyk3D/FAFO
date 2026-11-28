@@ -184,6 +184,23 @@ def test_reader_refuses_foreign_owner(tmp_path, monkeypatch):
     assert read_here_dir(d) == []
 
 
+def test_reader_refuses_file_owned_by_someone_else_in_own_directory(tmp_path, monkeypatch):
+    d = make_dir(tmp_path)
+    put(d, 27)
+    real_fstat = os.fstat
+
+    def other_owner(fd):
+        st = real_fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return st
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid + 1,
+                               st.st_gid, st.st_size, int(st.st_atime), int(st.st_mtime),
+                               int(st.st_ctime)))
+
+    monkeypatch.setattr(codex_mod.os, "fstat", other_owner)
+    assert read_here_dir(d) == []
+
+
 def test_reader_refuses_oversize_file(tmp_path):
     d = make_dir(tmp_path)
     p = put(d, 24)
