@@ -57,7 +57,9 @@ CLOCK_SLACK_S = 0.25
 # older than this without a record is not matched (it simply shows as a plain process row).
 MAX_HOOK_DELAY_S = 600.0
 MAX_PID = 2**22  # Linux pid_max ceiling; larger values are not pids
-_HERE_SID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# Codex session ids are UUIDs. Nothing else is accepted, so a value shaped like a credential can
+# never be copied into a session id or address.
+_HERE_SID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _HERE_KEYS = frozenset({"session_id", "ppid", "started_at"})
 _NAME_ID_CHARS = 8
 
@@ -416,9 +418,12 @@ def collect_procs(
         activity = observe_activity(tracker, pid, entry)
         rec = records.get(pid)
         # PID reuse: the process now holding this pid (a codex process, as the match above
-        # requires) must have started shortly before the hook wrote the record.
-        if rec is not None and (
-            rec.started_at - MAX_HOOK_DELAY_S <= entry.started <= rec.started_at + CLOCK_SLACK_S
+        # requires) must have started shortly before the hook wrote the record, and the record
+        # cannot be written later than now.
+        if (
+            rec is not None
+            and rec.started_at <= now + CLOCK_SLACK_S
+            and rec.started_at - MAX_HOOK_DELAY_S <= entry.started <= rec.started_at + CLOCK_SLACK_S
         ):
             sessions.append(
                 Session(

@@ -97,6 +97,140 @@ def test_hook_unwritable_state_dir_still_exits_zero(tmp_path):
     assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
 
 
+def hook_python() -> str:
+    text = HOOK.read_text(encoding="utf-8")
+    return text.split("<<'PYEOF'\n", 1)[1].split("\nPYEOF\n", 1)[0]
+
+
+def run_hook_in_process(base: Path, monkeypatch, *, euid: int | None = None) -> None:
+    import io
+    import runpy
+    import sys
+
+    stdin = type("In", (), {"buffer": io.BytesIO(json.dumps({"session_id": SID}).encode())})()
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "argv", ["hook", str(base)])
+    if euid is not None:
+        monkeypatch.setattr(os, "geteuid", lambda: euid)
+    script = base.parent / "hook_under_test.py"
+    script.write_text(hook_python(), encoding="utf-8")
+    runpy.run_path(str(script), run_name="hook")
+
+
+def private(path: Path, mode: int = 0o700) -> Path:
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    path.chmod(mode)
+    return path
+
+
+def test_hook_refuses_symlinked_codex_here(tmp_path):
+    base = private(tmp_path / "base")
+    outside = private(tmp_path / "outside")
+    (base / "codex-here").symlink_to(outside)
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+    assert list(outside.iterdir()) == []
+
+
+def test_hook_refuses_symlinked_base(tmp_path):
+    outside = private(tmp_path / "outside")
+    private(outside / "codex-here")
+    (tmp_path / "base").symlink_to(outside)
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(tmp_path / "base"))
+    assert r.returncode == 0
+    assert list((outside / "codex-here").iterdir()) == []
+
+
+def test_hook_refuses_symlinked_component_below_base(tmp_path):
+    outside = private(tmp_path / "outside")
+    base = private(tmp_path / "base")
+    (base / "codex-here").symlink_to(outside)
+    base2 = private(tmp_path / "base2")
+    (base2 / "x").symlink_to(base)
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base2 / "x"))
+    assert r.returncode == 0
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o705, 0o777])
+def test_hook_refuses_existing_open_directory(tmp_path, mode):
+    base = private(tmp_path / "base")
+    here = private(base / "codex-here", mode)
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+    assert list(here.iterdir()) == []
+    assert stat.S_IMODE(here.stat().st_mode) == mode  # left as found, never repaired in place
+
+
+def test_hook_refuses_open_base_directory(tmp_path):
+    base = private(tmp_path / "base", 0o755)
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert r.returncode == 0
+    assert list(base.iterdir()) == []
+
+
+def test_hook_accepts_existing_private_directory(tmp_path):
+    base = private(tmp_path / "base")
+    here = private(base / "codex-here")
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert r.returncode == 0
+    assert [p.name for p in here.iterdir()] == [f"{os.getpid()}.json"]
+    assert stat.S_IMODE((here / f"{os.getpid()}.json").stat().st_mode) == 0o600
+
+
+def test_hook_in_process_writes_when_owner_matches(tmp_path, monkeypatch):
+    base = private(tmp_path / "base")
+    run_hook_in_process(base, monkeypatch)
+    assert [p.name for p in (base / "codex-here").iterdir()] == [f"{os.getppid()}.json"]
+
+
+def test_hook_refuses_directory_owned_by_someone_else(tmp_path, monkeypatch):
+    base = private(tmp_path / "base")
+    private(base / "codex-here")
+    run_hook_in_process(base, monkeypatch, euid=UID + 1)
+    assert list((base / "codex-here").iterdir()) == []
+
+
+def test_hook_creates_missing_directories_private(tmp_path):
+    base = tmp_path / "a" / "b" / "base"
+    r, _ = run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert r.returncode == 0
+    for d in (tmp_path / "a", tmp_path / "a" / "b", base, base / "codex-here"):
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700, d
+
+
+def test_hook_leaves_no_temp_file_behind(tmp_path):
+    base = private(tmp_path / "base")
+    run_hook(tmp_path, json.dumps({"session_id": SID}).encode(), arg=str(base))
+    assert not [p for p in (base / "codex-here").iterdir() if p.name.endswith(".tmp")]
+
+
+TOKENS = [
+    "ghp_" + "a" * 36,
+    "sk-" + "A1b2" * 8,
+    "AKIA" + "A" * 16,
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc".replace(".", "-"),
+    "plain-id_1",
+    SID.upper().replace("-", "_"),
+    SID[:-1],  # one digit short
+    "g" + SID[1:],  # not hex
+]
+
+
+@pytest.mark.parametrize("sid", TOKENS)
+def test_hook_refuses_non_uuid_session_id(tmp_path, sid):
+    r, here = run_hook(tmp_path, json.dumps({"session_id": sid}).encode())
+    assert r.returncode == 0
+    assert not here.exists() or list(here.iterdir()) == []
+
+
+@pytest.mark.parametrize("sid", [SID, SID.upper()])
+def test_hook_accepts_uuid_either_case(tmp_path, sid):
+    r, here = run_hook(tmp_path, json.dumps({"session_id": sid}).encode())
+    assert r.returncode == 0
+    assert json.loads((here / f"{os.getpid()}.json").read_text())["session_id"] == sid
+
+
 def test_hook_passes_bash_syntax_check():
     assert subprocess.run(["bash", "-n", str(HOOK)], check=False).returncode == 0
     sc = shutil.which("shellcheck")
@@ -540,3 +674,49 @@ def test_real_process_create_time_is_not_after_wall_clock():
         proc.wait()
     assert created <= now + codex_mod.CLOCK_SLACK_S
     assert now - created < 5
+
+
+# ---- session id shape and the supplied clock ---------------------------------------------------
+
+
+@pytest.mark.parametrize("sid", TOKENS)
+def test_reader_refuses_non_uuid_session_id(tmp_path, sid):
+    d = make_dir(tmp_path)
+    put(d, 810, sid=sid)
+    assert rd(d) == []
+
+
+@pytest.mark.parametrize("sid", [SID, SID.upper()])
+def test_reader_accepts_uuid_either_case(tmp_path, sid):
+    d = make_dir(tmp_path)
+    put(d, 811, sid=sid)
+    assert [r.session_id for r in rd(d)] == [sid]
+
+
+def test_token_shaped_id_never_reaches_a_session(tmp_path):
+    d = make_dir(tmp_path)
+    put(d, 812, sid="ghp_" + "a" * 36, started=1000.0)
+    res = collect([FakeProc(812, 1, ["codex"], started=1000.0)], d)
+    assert res.sessions == [] and [p.pid for p in res.procs] == [812]
+
+
+NOW = 5000.0  # the clock in ctx()
+
+
+@pytest.mark.parametrize(
+    "rec_at, accepted",
+    [
+        (NOW, True),
+        (NOW + 0.25, True),
+        (NOW + 0.26, False),
+        (NOW + 300.0, False),
+        (NOW + 1e9, False),
+    ],
+)
+def test_record_from_the_future_is_not_attributed(tmp_path, rec_at, accepted):
+    d = make_dir(tmp_path)
+    put(d, 820, started=rec_at)
+    res = collect([FakeProc(820, 1, ["codex"], started=rec_at - 1.0)], d)
+    assert (len(res.sessions) == 1) is accepted
+    if not accepted:
+        assert [p.pid for p in res.procs] == [820]
