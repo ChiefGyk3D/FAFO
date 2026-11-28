@@ -109,6 +109,18 @@ def _state(state: str, stale: bool, age: str) -> str:
     return f"{state} ~{age}" if stale and age else state
 
 
+def _activity_word(activity: str) -> str:
+    """`active` or `idle` when known; nothing for unknown, so other rows look as before."""
+    return activity if activity in ("active", "idle") else ""
+
+
+def _session_state(n: SessionNode) -> str:
+    """The reported state; when it is blank or unknown, the CPU-based activity word if known."""
+    if n.state in ("", "unknown"):
+        return _activity_word(n.activity) or n.state
+    return n.state
+
+
 def _session_row(n: SessionNode, indent: int = 0) -> _Row:
     return _Row(
         [
@@ -116,7 +128,7 @@ def _session_row(n: SessionNode, indent: int = 0) -> _Row:
             n.name or "-",
             n.project,
             n.task,
-            _state(n.state, n.stale, n.age),
+            _state(_session_state(n), n.stale, n.age),
             n.elapsed,
             n.cpu,
             n.agent,
@@ -130,7 +142,7 @@ def _session_row(n: SessionNode, indent: int = 0) -> _Row:
 
 def _proc_row(p: ProcNode, indent: int) -> _Row:
     return _Row(
-        [str(p.pid), "", "", p.cmd, _state("", p.stale, p.age).strip(), "", p.cpu, p.agent, "", p.rss],
+        [str(p.pid), "", "", p.cmd, _state(_activity_word(p.activity), p.stale, p.age).strip(), "", p.cpu, p.agent, "", p.rss],
         indent=indent,
     )
 

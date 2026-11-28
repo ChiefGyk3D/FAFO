@@ -30,6 +30,7 @@ from .model import (
     MAX_LLM_SERVERS,
     OLD_SNAPSHOT_VERSION,
     SNAPSHOT_VERSION,
+    ActivityState,
     Inflight,
     JobRow,
     JobSummary,
@@ -68,6 +69,17 @@ def ensure_private_dir(directory: Path) -> None:
     _ensure_dir(Path(directory))
 
 
+def _omit_unknown_activity(plain) -> None:
+    """Leave out activity "unknown" (the default) so a snapshot with no CPU-based reading keeps the
+    key set older readers accept; a row that carries a reading is refused by them by design."""
+    for part in ("sessions", "procs"):
+        rows = plain.get(part) if isinstance(plain, dict) else None
+        if isinstance(rows, list):
+            for r in rows:
+                if isinstance(r, dict) and r.get("activity") == "unknown":
+                    del r["activity"]
+
+
 def _omit_default_source(plain) -> None:
     """Leave out the default project_source ("live") so a snapshot with no last-known project keeps
     the exact key set older readers accept. A snapshot that does carry one (idle session showing its
@@ -101,6 +113,7 @@ def write_snapshot(
     _omit_default_source(plain)
     if plain.get("jobs") is None:
         plain.pop("jobs", None)  # additive key: absent unless a jobs source ran
+    _omit_unknown_activity(plain)
     plain["llm"] = plain["llms"][0] if plain["llms"] else None  # first server, for older readers
     payload = _encode(plain)
     if len(payload) > MAX_SNAPSHOT_BYTES:
@@ -192,7 +205,7 @@ _IDENT_CHARS = 256
 # rows than this loses the excess tail rows, and only when everything else has failed to fit.
 MAX_KEPT_ROWS = 4096
 # Kept whole (up to _IDENT_CHARS): identity, plus short enumerations the reader checks.
-_SESSION_IDENT = ("session_id", "address", "name", "project_source")
+_SESSION_IDENT = ("session_id", "address", "name", "project_source", "activity")
 _HEALTH_IDENT = ("name", "status")
 
 
@@ -307,6 +320,11 @@ def _project_source(v):
         raise TypeError("bad project_source")
 
 
+def _activity(v):
+    if type(v) is not str or v not in get_args(ActivityState):
+        raise TypeError("bad activity")
+
+
 def _health_name(v):
     if type(v) is not str or len(v) > _MAX_NAME:
         raise TypeError("bad health name")
@@ -337,7 +355,7 @@ _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
     Proc: {
         "pid": _int, "ppid": _int, "session_pid": _opt_int, "agent": _str, "cmd": _str,
-        "cpu": _float, "rss": _int, "started": _float,
+        "cpu": _float, "rss": _int, "started": _float, "activity": _activity,
     },
     LoadedModel: {"name": _str, "vram": _int, "context": _int, "expires": _float},
     Inflight: {"model": _str, "session_pid": _opt_int, "started": _float},
@@ -353,8 +371,9 @@ _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
     "state": _str, "branch": _str, "worktree": _str, "started": _float, "cpu": _float,
     "rss": _int, "name": _str, "address": _str, "project_source": _project_source,
+    "activity": _activity,
 }
-_SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live"}  # absent in older snapshots
+_SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live", "activity": "unknown"}  # absent in older snapshots
 
 
 class _Drop(Exception):
@@ -408,6 +427,8 @@ def _check(cls, data, spec, tally):
 
 
 def _build(cls, data, tally):
+    if cls is Proc and type(data) is dict:
+        data = {"activity": "unknown", **data}  # absent in older snapshots
     out, identity_bad = _check(cls, data, _SPEC[cls], tally)
     if identity_bad:
         raise _Drop

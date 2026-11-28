@@ -713,7 +713,7 @@ def test_sanitize_warning_wording_and_no_values(tmp_path: Path, caplog):
 
 def test_default_live_snapshot_has_the_pre_project_source_key_set(tmp_path: Path):
     path, doc = _doc(tmp_path)
-    old = {f.name for f in fields(Session)} - {"project_source"}
+    old = {f.name for f in fields(Session)} - {"project_source", "activity"}
     for s in doc["sessions"]:
         assert set(s) == old
     snap = make_snapshot()

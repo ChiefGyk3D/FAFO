@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .activity import DEFAULT_ACTIVE_PCT, ActivityTracker
 from .config import SOURCE_NAMES, Config, ConfigError, SourceCfg
 from .ghapi import GhClient
 from .model import DEFAULT_LLM_NAME
@@ -82,6 +83,7 @@ def _claude(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
 
 def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
     return CodexSource(
+        tracker=ActivityTracker(scfg.options.get("active_cpu_pct", DEFAULT_ACTIVE_PCT)),
         show_args=set(cfg.show_args),
         args_mode=cfg.args_mode,
         value_flags=cfg.show_value_args,

@@ -16,6 +16,7 @@ MAX_LLM_SERVERS = 8
 
 Status = Literal["ok", "stale", "down", "absent"]
 ProjectSource = Literal["live", "last", "folder"]
+ActivityState = Literal["active", "idle", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class Session:
     name: str = ""
     address: str = ""  # full session id, for manual cross-session messaging
     project_source: ProjectSource = "live"  # live repo, last-known repo (idle), or folder name
+    activity: ActivityState = "unknown"  # CPU time moving (active) or flat (idle); see activity.py
 
 
 @dataclass
@@ -55,6 +57,7 @@ class Proc:
     cpu: float
     rss: int
     started: float
+    activity: ActivityState = "unknown"
 
 
 @dataclass
