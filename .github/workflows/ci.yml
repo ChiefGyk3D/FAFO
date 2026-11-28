@@ -62,7 +62,7 @@ jobs:
     steps:
       # Egress block, same pin and allow-list shape as the GYST jobs. The hosts are the checkout (github.com,
       # api.github.com), npm ci (registry.npmjs.org; the lockfile resolves only there) and the runner's own results
-      # receiver. No wildcards. A new host a future dependency needs fails this job loudly; add it here.
+      # receiver. No wildcards. A new host that a future dependency needs makes this job fail loudly, and must be added here deliberately.
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
