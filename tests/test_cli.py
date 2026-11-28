@@ -88,7 +88,7 @@ def test_extension_hook_registers_render_commands():
     sub = argparse.ArgumentParser().add_subparsers()
     assert not (sub.choices or {})
     cli.add_render_commands(sub)
-    assert set(sub.choices) == {"table", "json", "sessions", "tui"}
+    assert set(sub.choices) == {"table", "json", "sessions", "line", "tui"}
 
 
 def test_no_subcommand_is_usage_error():

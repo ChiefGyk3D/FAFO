@@ -557,3 +557,38 @@ def test_readme_marker_rules():
 def test_unit_default_matches_readme_and_both_paths_documented():
     text = (ROOT / "examples" / "systemd" / "README.md").read_text(encoding="utf-8")
     assert "~/.local/bin/fafo" in text and "fafo-venv/bin/fafo" in text
+
+
+# ---- the helper-expansion cap is documented -----------------------------------------------------
+
+
+def _helper_text(path: Path) -> str:
+    """The prose that describes the helper expansion, with comment markers and wrapping removed."""
+    text = path.read_text(encoding="utf-8")
+    flat = " ".join(line.lstrip("# ").strip() for line in text.splitlines())
+    start = flat.find("lists up to")
+    assert start != -1, f"{path.name}: helper expansion text not found"
+    return flat[start : start + 200]
+
+
+def helper_cap_documented(text: str, cap: int) -> bool:
+    return f"lists up to {cap} of that session's helpers" in text and "not shown" in text.replace(
+        "the ones not shown", "not shown"
+    )
+
+
+def test_helper_cap_and_hidden_count_are_documented():
+    from fafo.render.view import MAX_CHILDREN
+
+    for path in (README, ROOT / "config.example.toml"):
+        text = _helper_text(path)
+        assert helper_cap_documented(text, MAX_CHILDREN), (path.name, text)
+
+
+def test_helper_cap_check_bites():
+    from fafo.render.view import MAX_CHILDREN
+
+    good = _helper_text(README)
+    assert helper_cap_documented(good, MAX_CHILDREN)
+    assert not helper_cap_documented(good.replace(str(MAX_CHILDREN), str(MAX_CHILDREN + 1)), MAX_CHILDREN)
+    assert not helper_cap_documented(good.replace("not shown", "hidden"), MAX_CHILDREN)
