@@ -94,8 +94,8 @@ for example `+16 helpers (sleep x6, bash x4, cat x3)` (the count is exact, the t
 names are listed). A helper stays visible when it uses 5 percent CPU or more, or when a process
 that is not boring runs below it. Set `collapse_helpers = false` to turn this off, or change the
 `boring_procs` list (program basenames, at most 64 of 1-32 characters from `A-Za-z0-9._-`).
-In the terminal UI, Enter or `x` on the summary row shows the full list for that session and
-toggles it back; the session screen always lists every process. The pane reads `collapsed` and
+In the terminal UI, Enter or `x` on the summary row lists up to 256 of that session's helpers, followed by a
+row counting any not shown, and toggles it back; the session screen always lists every process. The pane reads `collapsed` and
 `collapsed_names` from `views.json` (additive fields, schema unchanged).
 
 ### Task labels
