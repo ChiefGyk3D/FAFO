@@ -9,7 +9,9 @@
 # State dir (the same private directory as the FAFO snapshot): the first argument if given, else
 # $XDG_RUNTIME_DIR/fafo, else ~/.local/state/fafo. Created 0700; the file is 0600, written
 # atomically. The state dir and codex-here are opened without following symlinks and must be
-# directories owned by you with no group or other access; otherwise nothing is written. Files for dead sessions are never removed by FAFO; clean up with, for example:
+# directories owned by you with no group or other access; otherwise nothing is written. The
+# directories ABOVE the state dir are resolved once with realpath (so a symlinked home still works)
+# and are trusted: pass only a state path you control. Files for dead sessions are never removed by FAFO; clean up with, for example:
 #   find "${XDG_RUNTIME_DIR:-$HOME/.local/state}/fafo/codex-here" -name '*.json' -mtime +7 -delete
 #
 # Install: see "Using FAFO with Codex" in the README.
