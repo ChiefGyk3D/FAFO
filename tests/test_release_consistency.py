@@ -11,7 +11,14 @@ import pytest
 import fafo
 
 ROOT = Path(__file__).resolve().parent.parent
-SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+# SemVer 2.0.0 (semver.org, the official regex without capture groups): no leading zeroes in the numeric
+# parts, prerelease and build metadata allowed. A leading "v" is not part of a version; only the tag has it.
+_ID = r"(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+SEMVER = re.compile(
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    rf"(?:-{_ID}(?:\.{_ID})*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$"
+)
+VERSION = fafo.__version__
 SHARED = re.compile(r"git-your-ship-together/\.github/workflows/\S+@([0-9a-f]{40}) # (v\d+\.\d+\.\d+)\s*$")
 
 
@@ -23,7 +30,7 @@ def check_release(version: str, changelog: str, tag: str | None) -> list[str]:
     """Return the problems; an empty list means the release lines up."""
     problems = []
     if not SEMVER.match(version):
-        problems.append(f"version {version!r} is not MAJOR.MINOR.PATCH")
+        problems.append(f"version {version!r} is not valid SemVer 2.0.0")
     versions = changelog_versions(changelog)
     if "Unreleased" not in versions:
         problems.append("CHANGELOG has no Unreleased section")
@@ -50,17 +57,13 @@ def test_version_changelog_and_tag_line_up():
     assert check_release(fafo.__version__, changelog, tag) == []
 
 
-def test_first_release_is_0_1_0():
-    assert fafo.__version__ == "0.1.0"
-
-
 @pytest.mark.parametrize(
     ("version", "changelog", "tag", "needle"),
     [
-        ("0.1.0", "## [Unreleased]\n", None, "no section for 0.1.0"),
-        ("0.1.0", "## [0.1.0]\n", None, "no Unreleased"),
-        ("0.1.0", "## [Unreleased]\n## [0.1.0]\n", "v0.2.0", "is not v0.1.0"),
-        ("0.1", "## [Unreleased]\n## [0.1]\n", None, "not MAJOR.MINOR.PATCH"),
+        (VERSION, "## [Unreleased]\n", None, f"no section for {VERSION}"),
+        (VERSION, f"## [{VERSION}]\n", None, "no Unreleased"),
+        (VERSION, f"## [Unreleased]\n## [{VERSION}]\n", "v999.0.0", f"is not v{VERSION}"),
+        (VERSION, f"## [Unreleased]\n## [{VERSION}]\n", VERSION, f"is not v{VERSION}"),  # tag needs the v
     ],
 )
 def test_guard_bites(version, changelog, tag, needle):
@@ -77,6 +80,18 @@ def test_release_workflow_uses_the_ci_pin():
         pins |= shared_pins(f)
     assert len(pins) == 1, f"shared workflow callers must share one pinned commit: {pins}"
     assert shared_pins(wf / "release.yml"), "release.yml calls no shared workflow"
+
+
+@pytest.mark.parametrize("version", ["0.1.0", "1.0.0", "1.2.3", "1.2.3-rc.1", "1.0.0-0.3.7", "1.2.3+build.5", "10.20.30"])
+def test_semver_accepts(version):
+    assert SEMVER.match(version)
+    assert check_release(version, f"## [Unreleased]\n## [{version}]\n", f"v{version}") == []
+
+
+@pytest.mark.parametrize("version", ["01.2.3", "1.02.3", "1.2.03", "1.2", "v1.2.3", "1.2.3.4", "1.2.3-01", "1.2.3-", "1.2.3+", ""])
+def test_semver_rejects(version):
+    assert not SEMVER.match(version)
+    assert any("not valid SemVer" in p for p in check_release(version, f"## [Unreleased]\n## [{version}]\n", None))
 
 
 def test_pin_guard_bites(tmp_path):

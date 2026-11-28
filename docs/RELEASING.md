@@ -58,3 +58,9 @@ scripts/clean_install_check.sh dist/fafo-X.Y.Z-py3-none-any.whl
 The script makes a fresh venv in a directory under `~/.cache` (never `/tmp`), installs the wheel,
 runs `fafo --version`, `fafo doctor` and `fafo table` with a throwaway state directory, and removes
 only that directory.
+
+The doctor step passes when `fafo doctor` exits 0 or 1 (1 means some source is down or stale; sources
+such as claude, codex and gemini may be absent on a clean machine), its output has a `host ok` line
+(the host source needs nothing installed, so it must work), and the output holds no Python
+traceback. Exit 2 or higher, a timeout (124) or a signal fails. The rule is
+`scripts/check_doctor_output.py`, covered by `tests/test_check_doctor_output.py`.

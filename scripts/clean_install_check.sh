@@ -4,6 +4,7 @@
 # Usage: scripts/clean_install_check.sh PATH/TO/fafo-X.Y.Z-py3-none-any.whl
 # The work directory is made with mktemp -d under the user's cache folder (never /tmp) and is
 # the only thing this script removes. State goes to a throwaway directory inside it.
+# `fafo doctor` must exit 0 or 1, report `host ok` and print no traceback (scripts/check_doctor_output.py).
 set -u
 set -o pipefail
 
@@ -58,11 +59,16 @@ fafo=$venv/bin/fafo
 step "fafo --version"
 timeout 30 "$fafo" --version < /dev/null || die "fafo --version failed"
 step "fafo doctor"
-# doctor exits non-zero when a source is down; only a crash or timeout (124, 126, 127, >=128) fails here.
-timeout 120 "$fafo" doctor < /dev/null
+# Exit 0 or 1 only (1: some source is down or stale), a `host ok` line, no traceback; the rule lives in
+# check_doctor_output.py. Output goes to a file inside the work directory, then is shown.
+doctor_out=$work/doctor.out
+timeout 120 "$fafo" doctor < /dev/null > "$doctor_out" 2>&1
 rc=$?
-if [ "$rc" -ge 124 ]; then die "fafo doctor crashed or timed out (exit $rc)"; fi
+cat -- "$doctor_out"
 printf 'doctor exit=%s\n' "$rc"
+here=$(cd "$(dirname -- "$0")" && pwd) || die "cannot resolve script directory"
+timeout 30 python3 -I "$here/check_doctor_output.py" "$rc" "$doctor_out" < /dev/null \
+    || die "fafo doctor output refused"
 step "fafo table"
 timeout 30 "$fafo" table --snapshot "$snapshot" < /dev/null || die "fafo table failed"
 step "ok"
