@@ -76,6 +76,24 @@ enabled = true
 enabled = true
 
 #@ BEGIN example
+## Codex quota: the 5-hour and weekly rate-limit windows (percent used, resets in) that Codex
+## records in its newest session rollout file. Off until this table exists with enabled = true.
+## Rollout files are your private conversations, so this source reads only the last 64 KB of
+## the ONE newest file, keeps only the three numbers per window (window length, percent used,
+## reset time) and logs and stores nothing else. It never follows symlinks and refuses a file
+## that is not a regular file owned by you. Shown as the "codex" quota row.
+# [sources.codex_quota]
+# enabled = true
+# interval_s = 30
+## Codex home folder (rollouts live in <codex_home>/sessions). Default: the CODEX_HOME
+## environment variable, else ~/.codex
+# codex_home = "~/.codex"
+## A reading older than this many seconds is marked stale ("stale" 1): it keeps its original
+## "as_of" time and stays visible. Default 1800 (30 minutes).
+# stale_after_s = 1800
+#@ END example
+
+#@ BEGIN example
 ## Local LLM server (Ollama). Off until this table exists. url is required.
 # [sources.ollama]
 # enabled = true

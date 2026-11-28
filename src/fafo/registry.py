@@ -28,6 +28,7 @@ from .sources.copilot import CopilotSource
 from .sources.gemini import GeminiSource
 from .sources.host import HostSource
 from .sources.ollama import OllamaSource, ServerSpec
+from .sources.quota_codex import DEFAULT_STALE_AFTER_S, CodexQuotaSource
 from .sources.runners import RunnerHost, RunnersCfg, RunnersSource
 from .sshro import SshHost
 
@@ -86,6 +87,12 @@ def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
         value_flags=cfg.show_value_args,
         here_dir=cfg.snapshot_path.parent / "codex-here",
     )
+
+
+def _codex_quota(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
+    home = scfg.options.get("codex_home") or env.get("CODEX_HOME") or "~/.codex"
+    stale = scfg.options.get("stale_after_s", DEFAULT_STALE_AFTER_S)
+    return CodexQuotaSource(_path(home), stale)
 
 
 def _gemini(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
@@ -163,6 +170,7 @@ SOURCE_FACTORIES: dict[str, Factory] = {
     "copilot": _copilot,
     "ollama": _ollama,
     "runners": _runners,
+    "codex_quota": _codex_quota,
 }
 
 

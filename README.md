@@ -153,6 +153,20 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+Codex quota (`codex_quota`, off until you enable it): the 5-hour and weekly rate-limit windows
+Codex writes into its newest session rollout file, shown as the `codex` quota row (`5h` and `wk`
+percent used, `5h_resets_in_s`, `wk_resets_in_s`, `as_of`, `stale`). Options: `codex_home`
+(default `$CODEX_HOME`, else `~/.codex`) and `stale_after_s` (default 1800; an older reading keeps
+its original `as_of`, gets `stale` 1 and is not removed). Rollout files are private
+conversations, so the source picks the newest file by name and `lstat` only, opens that one file
+(no-follow, regular file owned by you), reads its last 64 KB, parses lines from the end, keeps only
+the window length, percent used (clamped 0..100) and reset time, and logs nothing from the file.
+It follows no symlinks and skips lines over 256 KB or nested deeper than 12 levels. A missing or
+unreadable file gives status `absent` and no quota. The layout it reads (`payload.rate_limits.primary` and
+`secondary`, with `window_minutes`, `used_percent`, `resets_at`) is what Codex writes today, not a
+documented interface; if Codex changes it the row simply goes absent. The stale rendering is
+not dimmed yet; read `stale` in the snapshot.
+
 Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
 dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds, always less than `timeout_s` (the Ollama `timeout_s` must be at least 1 second, a lower value is refused; 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
 
