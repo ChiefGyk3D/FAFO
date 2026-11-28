@@ -1036,7 +1036,7 @@ def test_bad_health_name_with_structural_damage_refuses(tmp_path: Path):
 def test_unexpected_exception_in_the_row_validator_returns_none_and_logs_class_only(
     tmp_path: Path, monkeypatch, caplog
 ):
-    import fafo.store as store
+    from fafo import store
 
     def boom(v):
         raise RuntimeError("SECRET-detail")

@@ -397,12 +397,9 @@ def read_snapshot(path: Path) -> Snapshot | None:
         return snap
     except (
         OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
-        ArithmeticError, RecursionError,
-    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
+        ArithmeticError, RecursionError, RuntimeError, LookupError, AssertionError,
+    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not);
+        # an unexpected error class from a row validator is a refusal too, never a raise
+        # (a blanket `except Exception` is refused by the BLE001 lint, so the classes are named)
         _log.debug("snapshot unreadable: %s", type(exc).__name__)
-        return None
-    except MemoryError:
-        raise
-    except Exception as exc:  # any other surprise in a row validator: refuse, never raise
-        _log.warning("snapshot unreadable: unexpected %s", type(exc).__name__)  # class only
         return None
