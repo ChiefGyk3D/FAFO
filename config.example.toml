@@ -18,6 +18,14 @@
 # Command arguments shown in the process view. Everything else is shown as <arg>.
 show_args = ["exec", "resume", "--resume", "--model"]
 
+# Which of the shown flags take a value. The token after such a flag is shown too, after
+# credential masking and the 256-character cap (a masked or longer value shows as <redacted>).
+# A flag in show_args but not listed here is boolean: the next token stays <arg>. In "safe"
+# mode this works the same way. Each entry is a flag name such as "--model" (at most 32
+# entries, letters, digits and - only); secret-named flags (token, key, password, ...) are
+# refused. Default: ["--model", "--resume"].
+# show_value_args = ["--model", "--resume"]
+
 # Fold boring helper processes (sleep, tail, shells and the like) into one summary row per
 # session, such as "+16 helpers (sleep x6, bash x4, cat x3)". A boring process still shows when
 # it uses 5 percent CPU or more, or when something that is not boring runs below it. In the

@@ -243,6 +243,7 @@ def collect_procs(
     cache: ProcCache | None = None,
     *,
     args_mode: str = "allowlist",
+    value_flags: frozenset[str] = VALUE_FLAGS,
 ) -> SourceResult:
     table = read_table(lister)
     rows: list[Proc] = []
@@ -268,7 +269,7 @@ def collect_procs(
                 agent=sanitize_text(agent, 32),
                 cmd=sanitize_text(
                     redact_argv(
-                        list(entry.argv), show_args, value_flags=VALUE_FLAGS, mode=args_mode
+                        list(entry.argv), show_args, value_flags=value_flags, mode=args_mode
                     ),
                     1000,
                 ),
@@ -294,14 +295,17 @@ class CodexSource:
         *,
         cache: ProcCache | None = None,
         args_mode: str = "allowlist",
+        value_flags: frozenset[str] | None = None,
     ) -> None:
         self._args_mode = args_mode
+        self._value_flags = VALUE_FLAGS if value_flags is None else frozenset(value_flags)
         self._cache = default_cache(lister, cache)
         self._lister: Lister = lister if lister is not None else default_lister
         self._show_args = set(show_args or ())
 
     def collect(self, ctx: Ctx) -> SourceResult:
         return collect_procs(
-            self._lister, is_codex, "codex", self._show_args, self._cache, args_mode=self._args_mode
+            self._lister, is_codex, "codex", self._show_args, self._cache, args_mode=self._args_mode,
+            value_flags=self._value_flags,
         )
 
