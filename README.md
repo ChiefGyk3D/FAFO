@@ -31,6 +31,7 @@ fafo table      # print the table once (plain text, no color, fits the terminal)
 fafo sessions   # one line per Claude session: name, session id, project
 fafo tui        # full-screen view (needs Textual, which is a dependency)
 fafo json       # the snapshot as JSON, for scripts
+fafo line       # one short line for a status bar or shell prompt (empty when idle)
 ```
 
 The design used flags such as `--table`; the commands above are subcommands instead.
@@ -131,6 +132,35 @@ never deletes files; remove stale ones yourself, for example
 The hook's parent process being the Codex process is not stated by the Codex docs. FAFO relies
 on it and checks it with the pid and start-time rule above: if Codex starts hooks through an
 intermediate process, no record matches and no session row appears.
+
+### Status line
+
+`fafo line` prints exactly one line from the snapshot, for a status bar or a shell prompt. It
+reads the snapshot once, with no network and no subprocess. Segments, in this order, each shown
+only while something is busy: `cl 2/5` (Claude sessions busy of total), `cx 1/3` (Codex
+processes using at least 1% CPU, of all Codex processes), `ol 1/2` (Ollama busy requests of
+loaded models), `gm 1` (Gemini processes using at least 1% CPU), `rn 1/4` (runners busy of
+total), `cp 1` (Copilot cloud runs running). A source whose last poll failed shows a trailing
+`!` (`ol!`), even when idle. When everything is idle the line is empty (just a newline).
+
+```
+fafo line [--width N] [--color] [--quiet] [--stale-after SECONDS]
+```
+
+- `--width N` (default 80, clamped to 3 to 300): the line never has more visible characters.
+  Whole segments are dropped from the end and a cut ends in `...`; no segment is cut in half.
+- `--color` (off by default): dim for a stale source, red for a down one. Output is plain ASCII
+  without it.
+- A snapshot that is missing, unreadable, over the size cap or older than `--stale-after`
+  (default 30 seconds) prints `fafo: no collector`, or nothing with `--quiet`.
+- It always exits 0 and never prints a traceback, so a status bar is never broken. A bad
+  `--width` or `--stale-after` value falls back to the default instead of failing; an unknown
+  option is still a usage error.
+
+```
+# in a status bar or prompt: show the line only when there is something to show
+PS1='$(fafo line --quiet) \$ '
+```
 
 ### Claude pane
 
