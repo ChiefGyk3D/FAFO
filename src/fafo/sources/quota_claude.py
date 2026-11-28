@@ -61,6 +61,11 @@ _MISSING = (errno.ENOENT, errno.ENOTDIR)
 class QuotaCacheError(Exception):
     """The cache cannot be used. The text is always one of REASONS."""
 
+    def __init__(self, reason: str) -> None:
+        if reason not in REASONS:
+            raise ValueError("QuotaCacheError takes a reason word only")
+        super().__init__(reason)
+
 
 def _read(path: Path) -> bytes | None:
     """The file's bytes, None when it does not exist, QuotaCacheError for anything else."""

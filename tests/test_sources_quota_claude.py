@@ -345,3 +345,14 @@ def test_unreadable_perms(cache):
     if os.geteuid() == 0:
         pytest.skip("root reads anything")
     assert err_of(cache) in ("unreadable", "refused")
+
+
+@pytest.mark.parametrize("reason", quota_claude.REASONS)
+def test_cache_error_accepts_only_reason_words(reason):
+    assert str(quota_claude.QuotaCacheError(reason)) == reason
+
+
+@pytest.mark.parametrize("text", ["HOSTILE /home/x/token", "", "corrupt ", "Corrupt"])
+def test_cache_error_refuses_non_reason_text(text):
+    with pytest.raises(ValueError):
+        quota_claude.QuotaCacheError(text)
