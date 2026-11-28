@@ -249,3 +249,48 @@ def test_agent_tasks_filtered_to_configured_repos():
     assert parse_agent_tasks(tasks, now=NOW, repos=[]) == []
     src = CopilotSource(None, [], agent_tasks=FakeTasks(tasks))
     assert src.collect(_ctx()).sessions == []
+
+
+# ---- credential-shaped display text from the API is masked before truncation ----
+
+LONG_SECRET = "Zm9vYmFyYmF6" * 6  # base64-looking, 72 chars
+
+
+def _no_secret(*rows):
+    blob = repr(rows)
+    for needle in ("hunter2", LONG_SECRET, "Bearer abc"):
+        assert needle not in blob, needle
+
+
+def test_run_branch_and_name_credentials_masked():
+    res = _collect([_run(1, head_branch="token=hunter2", name=f"build {LONG_SECRET}")])
+    (s,) = res.sessions
+    _no_secret(s)
+    assert "<redacted>" in s.branch and "<redacted>" in s.task
+
+
+def test_run_name_bearer_header_masked():
+    (s,) = _collect([_run(1, name="Authorization: Bearer abc")]).sessions
+    _no_secret(s)
+
+
+def test_secret_straddling_the_cap_is_masked_before_truncation_in_run_name():
+    name = "x" * 50 + " token=hunter2"  # the secret straddles the 60 char name cap
+    (s,) = _collect([_run(1, name=name)]).sessions
+    assert "token=h" not in s.task and "hunter" not in s.task
+
+
+def test_agent_task_fields_credentials_masked():
+    payload = [{
+        "id": "t1", "state": "in_progress", "repo": REPO,
+        "name": "Authorization: Bearer abc",
+        "artifacts": [{"type": "branch", "data": {"head_ref": "token=hunter2"}}],
+    }]
+    (s,) = parse_agent_tasks(payload, now=NOW, repos=[REPO])
+    _no_secret(s)
+    assert "<redacted>" in s.branch
+
+
+def test_benign_names_unchanged():
+    (s,) = _collect([_run(1, name="Copilot review", head_branch="feature/add-thing")]).sessions
+    assert s.branch == "feature/add-thing" and s.task.endswith("Copilot review")

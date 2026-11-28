@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 
 from fafo.ghapi import GhClient
 from fafo.model import Runner
-from fafo.redact import sanitize_text
+from fafo.redact import mask_credentials, sanitize_text
 from fafo.source import Ctx, SourceResult
 from fafo.sshro import SshError, SshHost, ssh_ro
 
@@ -46,7 +46,8 @@ class RunnersCfg:
 
 
 def _txt(value: object) -> str:
-    return sanitize_text(value, TEXT_MAX) if isinstance(value, str) else ""
+    """API-supplied display text: credential-masked before the length cap."""
+    return sanitize_text(mask_credentials(value), TEXT_MAX) if isinstance(value, str) else ""
 
 
 def _epoch(value: object) -> float | None:

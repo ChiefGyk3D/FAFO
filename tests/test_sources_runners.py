@@ -299,3 +299,23 @@ def test_real_listener_and_worker_lines_are_recognized():
     ps = PS_SELF_ONLY + " 100  9000 Runner.Listener /r/bin/Runner.Listener run\n"
     (r,) = collect(RunnersSource(cfg(), FakeGh(), ssh=_ssh_with_ps(ps))).runners
     assert r.state == "idle"
+
+
+def test_credential_shaped_workflow_job_and_step_names_are_masked():
+    secret = "Zm9vYmFyYmF6" * 6
+    st = [{"name": "Authorization: Bearer abc", "status": "in_progress", "number": 1}]
+    gh = FakeGh(
+        {("o/r", "in_progress"): [run_of(1, "token=hunter2")]},
+        {("o/r", 1): [job(name=f"deploy {secret}", st=st)]},
+    )
+    (r,) = collect(RunnersSource(cfg(), gh, ssh=good_ssh)).runners
+    blob = repr(r)
+    for needle in ("hunter2", secret, "Bearer abc"):
+        assert needle not in blob, needle
+    assert "<redacted>" in r.workflow and "<redacted>" in r.job
+
+
+def test_benign_runner_labels_unchanged():
+    gh = FakeGh({("o/r", "in_progress"): [run_of(1, "CI")]}, {("o/r", 1): [job()]})
+    (r,) = collect(RunnersSource(cfg(), gh, ssh=good_ssh)).runners
+    assert (r.workflow, r.job, r.step) == ("CI", "build", "step3")

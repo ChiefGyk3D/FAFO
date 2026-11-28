@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from ..model import Session, Stamped
-from ..redact import sanitize_text
+from ..redact import mask_credentials, sanitize_text
 from ..source import Ctx, SourceResult
 
 CAPABILITY = (
@@ -78,7 +78,8 @@ def _epoch(value: Any) -> float:
 
 
 def _str(value: Any, limit: int) -> str:
-    return sanitize_text(value, limit) if isinstance(value, str) else ""
+    """API-supplied display text: credential-masked first, so a secret cannot straddle the cap."""
+    return sanitize_text(mask_credentials(value), limit) if isinstance(value, str) else ""
 
 
 def _copilot_dynamic(run: Any) -> tuple[int, str] | None:
@@ -130,7 +131,7 @@ def _task_branch(task: dict) -> str:
         src = data if isinstance(data, dict) else art
         ref = src.get("head_ref")
         if isinstance(ref, str):
-            return sanitize_text(ref, 100)
+            return _str(ref, 100)
     return ""
 
 
@@ -165,7 +166,7 @@ def parse_agent_tasks(
         project_name = allowed.get(repo.strip().lower()) if isinstance(repo, str) else None
         if not project_name:
             continue
-        sid = sanitize_text(tid, _ID_LEN)
+        sid = _str(tid, _ID_LEN)
         if not sid:
             continue
         out.append(
