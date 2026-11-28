@@ -3,9 +3,12 @@
 Codex records its rate limits inside its session rollout files, which are the owner's private
 conversations. This module therefore reads as little as it can and keeps only numbers:
 
+* The configured `codex_home` path itself may be a symlink: it is the user's own configuration
+  and is resolved once. Everything below it is opened without following links: `sessions` and
+  every directory and file under it are opened with no-follow descriptors.
 * The newest rollout file is chosen from directory entry names and `lstat` data alone (no file
-  is opened to compare). Directories are walked through descriptors with no-follow; a symlink,
-  a directory named like a rollout and any non-regular file is never a candidate.
+  is opened to compare). A symlink, a directory named like a rollout and any non-regular file
+  is never a candidate.
 * Exactly ONE file is opened (descriptor, no-follow, non-blocking so a FIFO cannot hang it),
   checked with `fstat` (regular file, owned by the user) and read from its last 64 KB only.
 * Lines are parsed from the end backwards. A line is parsed only when it contains the literal
@@ -284,6 +287,8 @@ class CodexQuotaSource:
 
     def _read(self, ctx: Ctx) -> SourceResult | str:
         now = ctx.clock()
+        # codex_home itself is opened WITHOUT O_NOFOLLOW on purpose: it may be a symlink the owner set.
+        # Everything below it (sessions, days, the rollout) is opened with _DIR_FLAGS or _read_tail.
         try:
             home_fd = os.open(self.codex_home, os.O_RDONLY | _O_DIR | _O_CLOEXEC)
         except OSError:

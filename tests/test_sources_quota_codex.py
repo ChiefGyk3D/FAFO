@@ -245,6 +245,51 @@ def test_symlinked_day_directory_is_not_entered(tmp_path):
     assert run(tmp_path).status == "absent"
 
 
+def test_symlinked_day_directory_loses_to_a_real_older_file(tmp_path):
+    # The symlinked day folder holds the newest file; it must be skipped, not merely make the walk empty.
+    outside = tmp_path / "outside" / "27"
+    outside.mkdir(parents=True)
+    (outside / "rollout-link-day.jsonl").write_text(rec(iso(NOW), p=(300, 88, NOW + 5), s=None) + "\n")
+    real = make(tmp_path, [rec(iso(NOW - 50), p=(300, 33, NOW + 5), s=None)],
+                rel="sessions/2026/11/26/rollout-real.jsonl", mtime=NOW - 9000)
+    os.symlink(outside, tmp_path / "sessions" / "2026" / "11" / "27")
+    assert run(tmp_path).quota["codex"]["5h"] == 33.0
+    assert real.exists()
+
+
+def test_symlinked_codex_home_is_read(tmp_path):
+    # The configured home path itself may be a symlink: it is the user's own setting, resolved once.
+    real_home = tmp_path / "real_home"
+    make(real_home, [rec(iso(NOW - 60))])
+    link_home = tmp_path / "link_home"
+    os.symlink(real_home, link_home)
+    q = run(link_home).quota["codex"]
+    assert q["5h"] == 42.5 and q["wk"] == 7.0
+
+
+def test_symlinked_sessions_folder_is_refused(tmp_path):
+    # Everything below the home is opened without following links, so a linked sessions folder is absent.
+    elsewhere = tmp_path / "elsewhere"
+    make(elsewhere, [rec(iso(NOW - 60))])
+    home = tmp_path / "home"
+    home.mkdir()
+    os.symlink(elsewhere / "sessions", home / "sessions")
+    res = run(home)
+    assert res.status == "absent" and res.quota == {}
+
+
+def test_symlink_rollout_loses_to_a_real_older_file(tmp_path):
+    # The symlinked rollout is newer; it must not be a candidate, so the real older file is chosen.
+    real = tmp_path / "elsewhere.jsonl"
+    real.write_text(rec(iso(NOW), p=(300, 88, NOW + 5), s=None) + "\n")
+    make(tmp_path, [rec(iso(NOW - 50), p=(300, 33, NOW + 5), s=None)],
+         rel="sessions/2026/11/26/rollout-real.jsonl", mtime=NOW - 9000)
+    d = tmp_path / "sessions" / "2026" / "11" / "27"
+    d.mkdir(parents=True)
+    os.symlink(real, d / "rollout-link.jsonl")
+    assert run(tmp_path).quota["codex"]["5h"] == 33.0
+
+
 def test_fifo_rollout_does_not_hang(tmp_path):
     d = tmp_path / "sessions" / "2026" / "11" / "27"
     d.mkdir(parents=True)

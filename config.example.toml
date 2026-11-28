@@ -80,8 +80,10 @@ enabled = true
 ## records in its newest session rollout file. Off until this table exists with enabled = true.
 ## Rollout files are your private conversations, so this source reads only the last 64 KB of
 ## the ONE newest file, keeps only the three numbers per window (window length, percent used,
-## reset time) and logs and stores nothing else. It never follows symlinks and refuses a file
-## that is not a regular file owned by you. Shown as the "codex" quota row.
+## reset time) and logs and stores nothing else. The codex_home path itself may be a symlink
+## (it is your own setting, resolved once). Below it nothing is followed: sessions and every
+## folder and file under it are opened without following links, and a file that is not a
+## regular file owned by you is refused. Shown as the "codex" quota row.
 # [sources.codex_quota]
 # enabled = true
 # interval_s = 30
