@@ -62,7 +62,7 @@ def snap(*, sessions=(), procs=(), llms=(), runners=(), hl=None, taken=NOW - 2):
 
 def llm(models=1, busy=0, reachable=True):
     return LlmServer(
-        models=[LoadedModel(f"m{i}", 1, 1, NOW + 60) for i in range(models)], queue=busy,
+        models=[LoadedModel(f"m{i}", 1, 1, NOW + 60) for i in range(models)], queue=0,
         inflight=[Inflight("m0", None, NOW) for _ in range(busy)], gpu={}, reachable=reachable,
     )
 
