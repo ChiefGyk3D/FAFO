@@ -86,7 +86,7 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
 Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
-dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds (so 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
+dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds, always less than `timeout_s` (the Ollama `timeout_s` must be at least 1 second, a lower value is refused; 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
 
 Helper processes: a session that runs many short helpers (`sleep`, `tail`, shells) would fill
 the screen, so the table, the terminal UI and the Claude pane show one summary row per session,
