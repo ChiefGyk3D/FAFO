@@ -111,7 +111,7 @@ def run_hook_in_process(base: Path, monkeypatch, *, euid: int | None = None) -> 
     monkeypatch.setattr(sys, "argv", ["hook", str(base)])
     if euid is not None:
         monkeypatch.setattr(os, "geteuid", lambda: euid)
-    exec(compile(hook_python(), "hook", "exec"), {"__name__": "hook"})  # noqa: S102 - the shipped script
+    exec(compile(hook_python(), "hook", "exec"), {"__name__": "hook"})
 
 
 def private(path: Path, mode: int = 0o700) -> Path:
