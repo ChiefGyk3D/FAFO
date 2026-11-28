@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import activity
 from .redact import ARGS_MODES, _secret_name
 from .repospec import valid_repo
 
@@ -42,6 +43,7 @@ SECRET_WORDS = ("token", "password", "secret", "key")
 # Source-specific option keys, per source. Anything else is an unknown key.
 OPTION_KEYS: dict[str, frozenset[str]] = {
     "claude": frozenset({"sessions_dir", "task_labels"}),
+    "codex": frozenset({"active_cpu_pct"}),
     "ollama": frozenset({"url", "admission_log", "servers"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
@@ -277,6 +279,10 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
             if v not in TASK_LABEL_MODES:
                 raise _bad(n, "must be one of: " + ", ".join(TASK_LABEL_MODES))
             out[k] = v
+        elif k == "active_cpu_pct":
+            if not activity.valid_pct(v):
+                raise _bad(n, f"must be a number from {activity.MIN_ACTIVE_PCT} to {activity.MAX_ACTIVE_PCT}")
+            out[k] = float(v)
         elif k == "url":
             out[k] = _opt_text(v, n, MAX_URL_LEN)
         elif k == "repos":

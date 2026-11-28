@@ -31,6 +31,7 @@ from typing import Any
 
 import psutil
 
+from ..activity import ActivityTracker, observe_activity
 from ..model import Proc, Session, Stamped
 from ..proccache import ProcCache
 from ..redact import redact_argv, sanitize_text
@@ -391,6 +392,7 @@ def collect_procs(
     value_flags: frozenset[str] = VALUE_FLAGS,
     here: Callable[[list[int]], list[HereRecord]] | None = None,
     now: float = 0.0,
+    tracker: ActivityTracker | None = None,
 ) -> SourceResult:
     table = read_table(lister)
     records: dict[int, HereRecord] = {}
@@ -413,6 +415,7 @@ def collect_procs(
             rss = int(entry.handle.memory_info().rss)
         except (psutil.Error, OSError, ValueError, TypeError):
             continue
+        activity = observe_activity(tracker, pid, entry)
         rec = records.get(pid)
         # PID reuse: the process now holding this pid (a codex process, as the match above
         # requires) must have started shortly before the hook wrote the record, and the record
@@ -428,6 +431,7 @@ def collect_procs(
                     project=Stamped("", now), project_rule="none", task=agent, state="unknown",
                     branch="", worktree="", started=entry.started, cpu=cpu, rss=rss,
                     name=f"{agent}-{rec.session_id[:_NAME_ID_CHARS]}", address=rec.session_id,
+                    activity=activity,
                 )
             )
             if len(rows) + len(sessions) >= MAX_ROWS:
@@ -448,6 +452,7 @@ def collect_procs(
                 cpu=cpu,
                 rss=rss,
                 started=entry.started,
+                activity=activity,
             )
         )
         if len(rows) + len(sessions) >= MAX_ROWS:
@@ -469,7 +474,9 @@ class CodexSource:
         args_mode: str = "allowlist",
         value_flags: frozenset[str] | None = None,
         here_dir: Path | None = None,
+        tracker: ActivityTracker | None = None,
     ) -> None:
+        self._tracker = tracker if tracker is not None else ActivityTracker()
         self._here_dir = here_dir
         self._args_mode = args_mode
         self._value_flags = VALUE_FLAGS if value_flags is None else frozenset(value_flags)
@@ -481,7 +488,7 @@ class CodexSource:
         here_dir = self._here_dir
         return collect_procs(
             self._lister, is_codex, "codex", self._show_args, self._cache, args_mode=self._args_mode,
-            value_flags=self._value_flags, now=ctx.clock(),
+            value_flags=self._value_flags, now=ctx.clock(), tracker=self._tracker,
             here=(lambda pids: read_here_dir(here_dir, pids)) if here_dir is not None else None,
         )
 
