@@ -39,12 +39,11 @@ def cache(tmp_path):
     return d / "usage.json"
 
 
-def put(path: Path, data, mode=0o600):
+def put(path: Path, data):
     raw = data if isinstance(data, bytes) else json.dumps(data).encode()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(raw)
-    os.chmod(path, mode)
     return path
 
 
@@ -254,41 +253,60 @@ def test_directory_refused(cache):
     assert err_of(cache) in ("refused", "unreadable")
 
 
-@pytest.mark.parametrize("mode", [0o660, 0o640, 0o606, 0o666, 0o604, 0o620])
-def test_group_or_other_bits_refused(cache, mode):
-    put(cache, good(), mode=mode)
-    assert err_of(cache) == "refused"
-
-
-def _fake_owner(monkeypatch, *, regular):
-    """fstat reports another owner, for regular files only or for directories only."""
+def _fake_stat(monkeypatch, *, regular, mode=None, uid=None):
+    """Replace selected fields in fstat results for files or directories."""
     real = os.fstat
 
     def fstat(fd):
         st = real(fd)
         if stat.S_ISREG(st.st_mode) == regular:
-            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
-                                   st.st_uid + 1, *st[5:]))
+            fields = list(st)
+            if mode is not None:
+                fields[stat.ST_MODE] = mode
+            if uid is not None:
+                fields[stat.ST_UID] = uid
+            return os.stat_result(fields)
         return st
 
     monkeypatch.setattr(quota_claude.os, "fstat", fstat)
 
 
+@pytest.mark.parametrize(
+    ("extra_bit", "refused"),
+    [
+        (0, False),
+        (stat.S_IRGRP, True),
+        (stat.S_IWGRP, True),
+        (stat.S_IROTH, True),
+        (stat.S_IWOTH, True),
+    ],
+)
+def test_group_or_other_bits_refused(cache, monkeypatch, extra_bit, refused):
+    put(cache, good())
+    mode = stat.S_IFREG | stat.S_IRUSR | stat.S_IWUSR | extra_bit
+    _fake_stat(monkeypatch, regular=True, mode=mode)
+    if refused:
+        assert err_of(cache) == "refused"
+    else:
+        assert run(cache).quota["claude"]["weekly"]["used_pct"] == 63.0
+
+
 def test_foreign_owner_file_refused(cache, monkeypatch):
     put(cache, good())
-    _fake_owner(monkeypatch, regular=True)
+    _fake_stat(monkeypatch, regular=True, uid=os.geteuid() + 1)
     assert err_of(cache) == "refused"
 
 
 def test_foreign_owner_parent_refused(cache, monkeypatch):
     put(cache, good())
-    _fake_owner(monkeypatch, regular=False)
+    _fake_stat(monkeypatch, regular=False, uid=os.geteuid() + 1)
     assert err_of(cache) == "refused"
 
 
-def test_group_writable_parent_refused(cache):
+def test_group_writable_parent_refused(cache, monkeypatch):
     put(cache, good())
-    os.chmod(cache.parent, 0o770)
+    mode = stat.S_IFDIR | stat.S_IRWXU | stat.S_IRWXG
+    _fake_stat(monkeypatch, regular=False, mode=mode)
     assert err_of(cache) == "refused"
 
 
@@ -308,12 +326,14 @@ def test_mode_bits_have_a_stat_constant_check():
     assert quota_claude.BAD_MODE_BITS == stat.S_IRWXG | stat.S_IRWXO
 
 
-def test_no_raw_text_in_logs(cache, caplog):
+def test_no_raw_text_in_logs(cache, caplog, monkeypatch):
     caplog.set_level(logging.DEBUG)
     put(cache, b'{"windows":[{"label":"5h","used_percent":"LEAKY-VALUE-77"}]}')
     with pytest.raises(quota_claude.QuotaCacheError):
         run(cache)
-    put(cache, good(), mode=0o666)
+    put(cache, good())
+    mode = stat.S_IFREG | stat.S_IRUSR | stat.S_IWUSR | stat.S_IWOTH
+    _fake_stat(monkeypatch, regular=True, mode=mode)
     with pytest.raises(quota_claude.QuotaCacheError):
         run(cache)
     assert "LEAKY" not in caplog.text and str(cache) not in caplog.text
