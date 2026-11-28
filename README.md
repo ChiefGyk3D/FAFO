@@ -85,10 +85,14 @@ takes a different directory as its first argument; the collector reads the direc
 `snapshot_path`). Privacy: only the session id is recorded. The hook never reads
 `transcript_path` or any other field, prints nothing and always exits 0.
 
-The collector reads those files read-only (at most 256 files of 4 KB, owner-only regular files,
-strict schema, no symlinks) and uses one only while its pid is still a live `codex` process that
-started no later than the file was written, so a reused pid is ignored. The collector never
-deletes files; remove stale ones yourself, for example
+The collector reads those files read-only. It does not list the directory: for each live
+`codex` process it opens `<pid>.json` only (no-follow, regular file, owned by you, owner-only
+mode, at most 4 KB, strict schema; at most 256 processes per pass), so stale files never hide
+current ones. A record is used only if the process started at most 10 minutes before the record
+was written and at most 0.25 s after it (the hook runs after the process starts; the small
+allowance covers the different clocks). A reused pid, or a Codex session whose hook did not run
+within 10 minutes of its start, is not matched and shows as a plain process row. The collector
+never deletes files; remove stale ones yourself, for example
 `find ~/.local/state/fafo/codex-here -name '*.json' -mtime +7 -delete`.
 The hook's parent process must be the Codex process itself; if Codex starts hooks through an
 intermediate process, no session row appears (unverified).

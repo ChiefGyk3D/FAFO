@@ -5,10 +5,12 @@ named `codex`) through an injectable lister and attaches each to the nearest
 Claude Code ancestor. No Codex session or history file is read here.
 
 Optionally a Codex SessionStart hook (examples/codex/fafo-session-hook.sh) records
-`{session_id, ppid, started_at}` in `<state dir>/codex-here/<ppid>.json`. This module reads
-that directory (bounded, descriptor-based, no-follow) and, when a record belongs to a live
-codex process that started no later than the record, reports that process as a Session whose
-address is the Codex session id. The collector never deletes those files.
+`{session_id, ppid, started_at}` in `<state dir>/codex-here/<ppid>.json`. The collector looks up
+`<pid>.json` only for the pids of the live codex processes it found (the directory is never
+listed, so stale files cannot crowd out current ones), reading each record with descriptor-level
+checks (no-follow, regular file, owner, mode, size, strict schema). A record is used only when
+the process started within a short window before the record was written. The match reports that
+process as a Session whose address is the Codex session id. The collector never deletes files.
 
 The lister returns psutil.Process-like objects (pid, ppid(), cmdline(),
 cpu_percent(), memory_info(), create_time()). Any of those can fail because the
@@ -24,7 +26,6 @@ import re
 import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -44,10 +45,17 @@ _CODEX_HOSTS = frozenset({"codex-code-mode-host"})
 Lister = Callable[[], Iterable[Any]]
 
 MAX_HERE_FILES = 256  # records read per pass
-MAX_HERE_SCAN = 4096  # directory entries examined per pass
 MAX_HERE_BYTES = 4096  # bytes per record
-START_SLACK_S = 2.0  # clock jitter allowed between process start time and the hook's clock
-_HERE_NAME = re.compile(r"[1-9][0-9]{0,9}\.json")
+# The hook runs after the process starts, so a record's started_at is never earlier than the
+# process create_time. They come from different clocks (create_time is boot time plus clock ticks
+# of 10 ms, the hook uses time.time()), so a quarter second of slack covers granularity and
+# jitter. Boot time is read in whole seconds and rounded down, which makes create_time run early,
+# not late; a test compares a real process's create_time with time.time().
+CLOCK_SLACK_S = 0.25
+# A record only describes a process whose hook ran within this long after it started. A session
+# older than this without a record is not matched (it simply shows as a plain process row).
+MAX_HOOK_DELAY_S = 600.0
+MAX_PID = 2**22  # Linux pid_max ceiling; larger values are not pids
 _HERE_SID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _HERE_KEYS = frozenset({"session_id", "ppid", "started_at"})
 _NAME_ID_CHARS = 8
@@ -132,14 +140,19 @@ def _read_here_file(dfd: int, name: str) -> HereRecord | None:
     return None if data is None else _parse_here(data, name)
 
 
-def read_here_dir(directory: Path | str | None) -> list[HereRecord]:
-    """Valid records from the hook's directory; anything doubtful is skipped (fail closed).
+def read_here_dir(directory: Path | str | None, pids: Iterable[int]) -> list[HereRecord]:
+    """Records for exactly these (live) pids; anything doubtful is skipped (fail closed).
 
     The directory is opened without following a final symlink and checked on the descriptor
-    (a directory owned by this user with no group or other access); each file is opened
-    relative to it, no-follow, and checked on its own descriptor. Read-only: nothing is deleted.
+    (a directory owned by this user with no group or other access); `<pid>.json` is opened
+    relative to it, no-follow, and checked on its own descriptor. The directory is never listed,
+    so the number of stale files costs nothing. At most MAX_HERE_FILES pids are tried.
+    Read-only: nothing is deleted.
     """
     if directory is None:
+        return []
+    wanted = sorted({p for p in pids if type(p) is int and 0 < p <= MAX_PID})[:MAX_HERE_FILES]
+    if not wanted:
         return []
     try:
         dfd = os.open(
@@ -151,14 +164,9 @@ def read_here_dir(directory: Path | str | None) -> list[HereRecord]:
         st = os.fstat(dfd)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != _euid() or st.st_mode & 0o077:
             return []
-        try:
-            with os.scandir(dfd) as it:
-                names = [e.name for e in islice(it, MAX_HERE_SCAN) if _HERE_NAME.fullmatch(e.name)]
-        except OSError:
-            return []
         out: list[HereRecord] = []
-        for name in sorted(names)[:MAX_HERE_FILES]:
-            rec = _read_here_file(dfd, name)
+        for pid in wanted:
+            rec = _read_here_file(dfd, f"{pid}.json")
             if rec is not None:
                 out.append(rec)
         return out
@@ -379,10 +387,14 @@ def collect_procs(
     *,
     args_mode: str = "allowlist",
     value_flags: frozenset[str] = VALUE_FLAGS,
-    here: dict[int, HereRecord] | None = None,
+    here: Callable[[list[int]], list[HereRecord]] | None = None,
     now: float = 0.0,
 ) -> SourceResult:
     table = read_table(lister)
+    records: dict[int, HereRecord] = {}
+    if here is not None:  # only the live matching processes are looked up
+        live = [pid for pid in sorted(table) if match(table[pid].argv)]
+        records = {r.pid: r for r in here(live)}
     rows: list[Proc] = []
     sessions: list[Session] = []
     seen: set[tuple[int, float]] = set()
@@ -399,10 +411,12 @@ def collect_procs(
             rss = int(entry.handle.memory_info().rss)
         except (psutil.Error, OSError, ValueError, TypeError):
             continue
-        rec = here.get(pid) if here else None
-        # PID reuse: the process now holding this pid must have started no later than the record
-        # (it is a codex process, as the match above requires), else the file is someone else's.
-        if rec is not None and entry.started <= rec.started_at + START_SLACK_S:
+        rec = records.get(pid)
+        # PID reuse: the process now holding this pid (a codex process, as the match above
+        # requires) must have started shortly before the hook wrote the record.
+        if rec is not None and (
+            rec.started_at - MAX_HOOK_DELAY_S <= entry.started <= rec.started_at + CLOCK_SLACK_S
+        ):
             sessions.append(
                 Session(
                     pid=pid, agent=agent, session_id=rec.session_id,
@@ -459,9 +473,10 @@ class CodexSource:
         self._show_args = set(show_args or ())
 
     def collect(self, ctx: Ctx) -> SourceResult:
-        here = {r.pid: r for r in read_here_dir(self._here_dir)}
+        here_dir = self._here_dir
         return collect_procs(
             self._lister, is_codex, "codex", self._show_args, self._cache, args_mode=self._args_mode,
-            value_flags=self._value_flags, here=here, now=ctx.clock(),
+            value_flags=self._value_flags, now=ctx.clock(),
+            here=(lambda pids: read_here_dir(here_dir, pids)) if here_dir is not None else None,
         )
 

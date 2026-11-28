@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -113,6 +114,17 @@ def make_dir(tmp_path):
     return d
 
 
+def rd(d, pids=None):
+    """Read the directory for the pids named in it (the production caller passes live pids)."""
+    if pids is None:
+        try:
+            names = os.listdir(d) if d is not None else []
+        except OSError:
+            names = []
+        pids = sorted(int(n[:-5]) for n in names if re.fullmatch(r"[1-9][0-9]*\.json", n))[:256]
+    return read_here_dir(d, pids)
+
+
 def put(d: Path, pid: int, *, sid=SID, ppid=None, started=1000.0, mode=0o600, doc=None):
     p = d / f"{pid}.json"
     body = doc if doc is not None else {
@@ -125,13 +137,13 @@ def put(d: Path, pid: int, *, sid=SID, ppid=None, started=1000.0, mode=0o600, do
 def test_reader_accepts_valid_file(tmp_path):
     d = make_dir(tmp_path)
     put(d, 4242)
-    got = read_here_dir(d)
+    got = rd(d)
     assert [(r.pid, r.session_id, r.started_at) for r in got] == [(4242, SID, 1000.0)]
 
 
 def test_reader_missing_directory_is_empty(tmp_path):
-    assert read_here_dir(tmp_path / "nope") == []
-    assert read_here_dir(None) == []
+    assert rd(tmp_path / "nope") == []
+    assert rd(None) == []
 
 
 def test_reader_refuses_symlink_file(tmp_path):
@@ -140,7 +152,7 @@ def test_reader_refuses_symlink_file(tmp_path):
     real.write_text(json.dumps({"session_id": SID, "ppid": 7, "started_at": 1.0}))
     real.chmod(0o600)
     os.symlink(real, d / "7.json")
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_symlinked_directory(tmp_path):
@@ -148,40 +160,40 @@ def test_reader_refuses_symlinked_directory(tmp_path):
     put(d, 5)
     link = tmp_path / "link"
     os.symlink(d, link)
-    assert read_here_dir(link) == []
+    assert rd(link) == []
 
 
 def test_reader_refuses_directory_entry(tmp_path):
     d = make_dir(tmp_path)
     (d / "9.json").mkdir()
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_fifo_without_hanging(tmp_path):
     d = make_dir(tmp_path)
     os.mkfifo(d / "11.json", 0o600)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 @pytest.mark.parametrize("mode", [0o644, 0o660, 0o604, 0o606, 0o777])
 def test_reader_refuses_group_or_other_access(tmp_path, mode):
     d = make_dir(tmp_path)
     put(d, 21, mode=mode)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_open_directory_mode(tmp_path):
     d = make_dir(tmp_path)
     put(d, 22)
     d.chmod(0o755)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_foreign_owner(tmp_path, monkeypatch):
     d = make_dir(tmp_path)
     put(d, 23)
     monkeypatch.setattr(codex_mod, "_euid", lambda: UID + 1)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_file_owned_by_someone_else_in_own_directory(tmp_path, monkeypatch):
@@ -198,7 +210,7 @@ def test_reader_refuses_file_owned_by_someone_else_in_own_directory(tmp_path, mo
                                int(st.st_ctime)))
 
     monkeypatch.setattr(codex_mod.os, "fstat", other_owner)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_refuses_oversize_file(tmp_path):
@@ -206,7 +218,7 @@ def test_reader_refuses_oversize_file(tmp_path):
     p = put(d, 24)
     p.write_text(json.dumps({"session_id": SID, "ppid": 24, "started_at": 1.0, "x": "a" * 5000}))
     p.chmod(0o600)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 def test_reader_read_is_bounded_not_only_stat_checked(tmp_path, monkeypatch):
@@ -221,7 +233,7 @@ def test_reader_read_is_bounded_not_only_stat_checked(tmp_path, monkeypatch):
         return real_read(fd, n)
 
     monkeypatch.setattr(codex_mod.os, "read", spy)
-    read_here_dir(d)
+    rd(d)
     assert reads and max(reads) <= codex_mod.MAX_HERE_BYTES + 1
 
 
@@ -244,7 +256,7 @@ def test_reader_refuses_file_that_grows_past_cap_after_fstat(tmp_path, monkeypat
         {"session_id": SID, "ppid": 26, "started_at": 1.0, "pad": "a" * 8000}))
     (d / "26.json").chmod(0o600)
     monkeypatch.setattr(codex_mod.os, "fstat", liar)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
     assert big["n"] >= 1
 
 
@@ -268,7 +280,7 @@ def test_reader_refuses_file_that_grows_past_cap_after_fstat(tmp_path, monkeypat
 def test_reader_refuses_bad_schema(tmp_path, doc):
     d = make_dir(tmp_path)
     put(d, 31, doc=doc)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
 @pytest.mark.parametrize(
@@ -283,23 +295,47 @@ def test_reader_refuses_bad_json(tmp_path, text):
     p = d / "31.json"
     p.write_text(text)
     p.chmod(0o600)
-    assert read_here_dir(d) == []
+    assert rd(d) == []
 
 
-def test_reader_ignores_odd_file_names(tmp_path):
+def test_reader_reads_only_requested_pids(tmp_path):
     d = make_dir(tmp_path)
     put(d, 41)
-    for name in ("x.json", "41.json.bak", "-3.json", ".41.json.tmp", "041.json"):
-        p = d / name
-        p.write_text(json.dumps({"session_id": SID, "ppid": 41, "started_at": 1.0}))
-        p.chmod(0o600)
-    assert [r.pid for r in read_here_dir(d)] == [41]
+    put(d, 42)
+    assert [r.pid for r in read_here_dir(d, [41, 99])] == [41]
 
 
-def test_reader_file_count_cap_256(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bad", [0, -1, True, "41", 41.0, None, 2**40])
+def test_reader_ignores_invalid_pid_values(tmp_path, bad):
     d = make_dir(tmp_path)
-    for pid in range(1000, 1257):  # 257 files
+    put(d, 41)
+    assert read_here_dir(d, [bad]) == []
+
+
+def test_stale_files_cannot_hide_the_live_record(tmp_path):
+    d = make_dir(tmp_path)
+    for pid in range(1, 1001):  # 1000 stale records with low pids
         put(d, pid)
+    put(d, 50000)
+    got = read_here_dir(d, [50000])
+    assert [r.pid for r in got] == [50000]
+
+
+def test_reader_never_lists_the_directory(tmp_path, monkeypatch):
+    d = make_dir(tmp_path)
+    put(d, 61)
+    for name in ("scandir", "listdir", "walk"):
+        def boom(*a, _n=name, **k):
+            raise AssertionError("directory listing: " + _n)
+        monkeypatch.setattr(codex_mod.os, name, boom)
+    assert [r.pid for r in read_here_dir(d, [61])] == [61]
+
+
+def test_many_directory_entries_do_not_add_opens(tmp_path, monkeypatch):
+    d = make_dir(tmp_path)
+    for i in range(2000):
+        (d / f"junk{i}").write_text("x")
+    put(d, 71)
     opened: list[str] = []
     real_open = os.open
 
@@ -308,7 +344,29 @@ def test_reader_file_count_cap_256(tmp_path, monkeypatch):
         return real_open(path, flags, *a, **kw)
 
     monkeypatch.setattr(codex_mod.os, "open", spy)
-    got = read_here_dir(d)
+    assert [r.pid for r in read_here_dir(d, [71])] == [71]
+    assert len(opened) == 2  # the directory and the one record
+
+
+def test_live_pid_without_a_file_is_fine(tmp_path):
+    d = make_dir(tmp_path)
+    assert read_here_dir(d, [12345]) == []
+
+
+def test_reader_file_count_cap_256(tmp_path, monkeypatch):
+    d = make_dir(tmp_path)
+    for pid in range(1000, 1257):  # 257 files
+        put(d, pid)
+    pids = list(range(1000, 1257))
+    opened: list[str] = []
+    real_open = os.open
+
+    def spy(path, flags, *a, **kw):
+        opened.append(str(path))
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(codex_mod.os, "open", spy)
+    got = read_here_dir(d, pids)
     assert len(got) == 256
     assert len([p for p in opened if p.endswith(".json")]) == 256
 
@@ -326,7 +384,7 @@ def test_reader_never_opens_a_transcript_path(tmp_path, monkeypatch):
         return real_open(path, flags, *a, **kw)
 
     monkeypatch.setattr(codex_mod.os, "open", spy)
-    got = read_here_dir(d)
+    got = rd(d)
     assert [r.pid for r in got] == [52]  # the extra-key file is refused outright
     assert not any("transcript" in p or p.startswith("/nonexistent") for p in opened)
     assert all(p.endswith(".json") or p == str(d) for p in opened)
@@ -395,7 +453,7 @@ def test_pid_reused_by_non_codex_process_is_ignored(tmp_path):
 def test_small_clock_slack_is_tolerated(tmp_path):
     d = make_dir(tmp_path)
     put(d, 303, started=1000.0)
-    res = collect([FakeProc(303, 1, ["codex"], started=1000.5)], d)
+    res = collect([FakeProc(303, 1, ["codex"], started=1000.2)], d)
     assert len(res.sessions) == 1
 
 
@@ -435,3 +493,50 @@ def test_explicit_codex_id_marks_current(tmp_path):
     assert views.banner is not None and views.banner.session is not None
     assert views.banner.session.agent == "codex"
     assert views.sessions[0].is_current
+
+
+# ---- the start-time window --------------------------------------------------------------------
+
+REC_AT = 1000.0
+
+
+@pytest.mark.parametrize(
+    "proc_started, accepted",
+    [
+        (999.9, True),
+        (1000.0, True),
+        (1000.0 + codex_mod.CLOCK_SLACK_S, True),  # upper limit
+        (1000.0 + codex_mod.CLOCK_SLACK_S + 0.01, False),
+        (1001.0, False),  # an unrelated later codex process
+        (1000.0 - codex_mod.MAX_HOOK_DELAY_S, True),  # lower limit
+        (1000.0 - codex_mod.MAX_HOOK_DELAY_S - 0.01, False),
+        (1000.0 - 11 * 60, False),
+    ],
+)
+def test_start_time_window(tmp_path, proc_started, accepted):
+    d = make_dir(tmp_path)
+    put(d, 700, started=REC_AT)
+    res = collect([FakeProc(700, 1, ["codex"], started=proc_started)], d)
+    assert (len(res.sessions) == 1) is accepted
+
+
+def test_window_constants_are_tight_and_documented():
+    assert codex_mod.CLOCK_SLACK_S <= 0.25
+    assert codex_mod.MAX_HOOK_DELAY_S == 600
+
+
+def test_real_process_create_time_is_not_after_wall_clock():
+    """create_time (boot time + ticks) must not run ahead of time.time() by more than the slack."""
+    import time
+
+    import psutil
+
+    proc = subprocess.Popen(["sleep", "5"])
+    try:
+        now = time.time()
+        created = psutil.Process(proc.pid).create_time()
+    finally:
+        proc.kill()
+        proc.wait()
+    assert created <= now + codex_mod.CLOCK_SLACK_S
+    assert now - created < 5
