@@ -69,6 +69,20 @@ timeout_s = 5
 # use it only if you are comfortable with that.
 # task_labels = "activity"
 
+## Claude quota: the 5-hour and weekly usage windows, read from a JSON cache file that another
+## tool writes (FAFO never writes it). Off until this table exists; usage_cache is required.
+## The file must be a regular file you own with mode 0600 (no group or other bits) in a
+## directory you own that is not group or other writable, at most 64 KB, shaped like
+##   {"windows": [{"label": "5h", "used_percent": 41.4, "resets_at": 1800007800, "captured_at": 1799999940}, ...]}
+## label is "5h" or "weekly"; resets_at and captured_at are epoch seconds (resets_at may be null).
+## A window whose captured_at is over 30 minutes old is shown as stale with its original age.
+## A missing file shows as absent in doctor; a bad one shows only a reason class, never content.
+#@ BEGIN example
+# [sources.claude_quota]
+# enabled = true
+# usage_cache = "~/.cache/example/claude-usage.json"
+#@ END example
+
 [sources.codex]
 enabled = true
 

@@ -400,11 +400,35 @@ def _sort_key(n: SessionNode) -> tuple:
     )
 
 
-def _quota_lines(quota: dict) -> list[QuotaLine]:
+def _left_text(seconds: float) -> str:
+    n = int(seconds)
+    if n >= 2 * 86400:
+        return f"{n // 86400}d"
+    if n >= 3600:
+        return f"{n // 3600}h{(n % 3600) // 60:02d}m"
+    return f"{max(n, 0) // 60}m"
+
+
+def _window_text(w: dict, now: float) -> str:
+    """One quota window {used_pct, resets_in_s, as_of, stale}: "41% resets 2h10m stale 2h"."""
+    used = _num(w.get("used_pct"))
+    text = f"{used:.0f}%" if used is not None else UNKNOWN
+    left = _num(w.get("resets_in_s"))
+    if left is not None and left > 0:
+        text += f" resets {_left_text(left)}"
+    if w.get("stale") is True:
+        as_of = _num(w.get("as_of"))
+        text += f" stale {age_text(now - as_of if as_of is not None else None)}"
+    return text
+
+
+def _quota_lines(quota: dict, now: float = 0.0) -> list[QuotaLine]:
     def fmt(v: object) -> str:
         n = _num(v)
         if n is not None:
             return f"{n:g}"
+        if isinstance(v, dict) and "used_pct" in v:
+            return _window_text(v, now)
         return _s(v, 40)
 
     out: list[QuotaLine] = []
@@ -603,7 +627,7 @@ def build_views(
         llms_hidden=max(0, len(snap.llms) - len(llms)),
         runners=runners,
         runners_hidden=max(0, len(snap.runners) - MAX_RUNNERS),
-        quota=_quota_lines(snap.quota),
+        quota=_quota_lines(snap.quota, now),
         banner=_banner(current, current_session_id),
     )
 

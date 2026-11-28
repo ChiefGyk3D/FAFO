@@ -29,13 +29,14 @@ from .ghapi import GhError
 from .redact import mask_credentials, sanitize_text
 from .registry import Factory, build
 from .source import Ctx, Source, SourceResult
+from .sources.quota_claude import REASONS, QuotaCacheError
 from .sshro import SshError
 
 DOCTOR_TIMEOUT_S = 5.0
 DETAIL_MAX = 120
 EXIT_OK, EXIT_ERROR, EXIT_CONFIG = 0, 1, 2
 _STATUSES = ("ok", "absent", "down", "stale")
-_SAFE_MESSAGE_ERRORS = (SshError, GhError)
+_SAFE_MESSAGE_ERRORS = (SshError, GhError, QuotaCacheError)
 
 
 def _safe(cfg: Config, text: object, cap: int = DETAIL_MAX) -> str:
@@ -95,9 +96,16 @@ def _cmd_run(args: argparse.Namespace, factories: Mapping[str, Factory] | None) 
 # -- doctor ------------------------------------------------------------------------------------
 
 
+def _message_ok(exc: BaseException) -> bool:
+    """A cache error shows only its fixed reason word; other allowlisted errors show their text."""
+    if isinstance(exc, QuotaCacheError):
+        return str(exc) in REASONS
+    return bool(str(exc))
+
+
 def _error_detail(cfg: Config, exc: BaseException) -> str:
     name = type(exc).__name__
-    if isinstance(exc, _SAFE_MESSAGE_ERRORS) and str(exc):
+    if isinstance(exc, _SAFE_MESSAGE_ERRORS) and _message_ok(exc):
         return _safe(cfg, f"{name}: {exc}")
     return _safe(cfg, name)
 

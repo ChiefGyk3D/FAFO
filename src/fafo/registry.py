@@ -29,6 +29,7 @@ from .sources.copilot import CopilotSource
 from .sources.gemini import GeminiSource
 from .sources.host import HostSource
 from .sources.ollama import OllamaSource, ServerSpec
+from .sources.quota_claude import ClaudeQuotaSource
 from .sources.runners import RunnerHost, RunnersCfg, RunnersSource
 from .sshro import SshHost
 
@@ -78,6 +79,10 @@ def _claude(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
         value_flags=cfg.show_value_args,
         task_labels=scfg.options.get("task_labels", "activity"),
     )
+
+
+def _claude_quota(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
+    return ClaudeQuotaSource(_path(_need("claude_quota", "usage_cache", scfg)))
 
 
 def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
@@ -160,6 +165,7 @@ def _copilot(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
 SOURCE_FACTORIES: dict[str, Factory] = {
     "host": _host,
     "claude": _claude,
+    "claude_quota": _claude_quota,
     "codex": _codex,
     "gemini": _gemini,
     "copilot": _copilot,
