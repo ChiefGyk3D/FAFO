@@ -176,6 +176,26 @@ def test_secret_behind_controls_is_masked_before_any_cut(jd):
     assert not any(CANARY[i : i + 12] in t for i in range(len(CANARY) - 11))
 
 
+# Same canary as the redactor tests: 100 characters, no known prefix, built from pieces.
+TITLE_CANARY = "A1b2C3d4" * 12 + "Zq9w"
+
+
+@pytest.mark.parametrize("controls", [3965, 4096])
+def test_title_controls_then_canary_leaks_no_piece(jd, controls):
+    put(jd, "a.json", job("running", title=ESC * controls + TITLE_CANARY))
+    t = collect(jd, show_titles=True).jobs.rows[0].title
+    assert "<redacted>" in t
+    assert not any(TITLE_CANARY[i : i + 8] in t for i in range(len(TITLE_CANARY) - 7))
+
+
+def test_title_70000_controls_is_refused_whole_and_leaks_nothing(jd):
+    """70000 escaped controls make the file exceed the 64 KB cap: it is refused, never shown."""
+    put(jd, "a.json", job("running", title=ESC * 70000 + TITLE_CANARY))
+    s = collect(jd, show_titles=True).jobs
+    assert (s.running, s.invalid, s.rows) == (0, 1, [])
+    assert TITLE_CANARY[:8] not in repr(s)
+
+
 def test_hostile_labels_are_dropped(jd):
     put(jd, "a.json", job("running", phase=f"w{ESC}[2Jx", kindLabel="r" + BEL))
     r = collect(jd).jobs.rows[0]

@@ -1,6 +1,8 @@
 import time
 
-from fafo.redact import mask_credentials
+import pytest
+
+from fafo.redact import mask_credentials, masked_text
 
 TOKEN = "ghp_" + "a1B2" * 8
 
@@ -52,3 +54,33 @@ def test_bounded_on_hostile_input():
     assert time.monotonic() - t0 < 2.0
     assert len(out) < 5_000
     assert mask_credentials("") == ""
+
+
+# -- a run cut by the input cap, and normalizing before masking ---------------------------
+# Built from pieces: 100 characters, no known credential prefix, so only the long-run rule
+# can mask it. A cut prefix shorter than 40 characters is not a long run.
+CANARY = "A1b2C3d4" * 12 + "Zq9w"
+CAP = 4000  # mask_credentials reads at most MAX_REDACTED_LEN * 4 characters
+
+
+def _no_canary_piece(out: str) -> bool:
+    """No canary character outside the redaction marker: a single survivor is a leak too."""
+    return not set(out.replace("<redacted>", "")) & set(CANARY)
+
+
+@pytest.mark.parametrize("offset", [CAP - 1, CAP, CAP + 1, CAP + 50])
+@pytest.mark.parametrize("lead", [" ", chr(27)])
+def test_run_straddling_the_input_cap_leaks_no_piece(offset, lead):
+    out = mask_credentials(lead * offset + CANARY)
+    assert _no_canary_piece(out)
+
+
+def test_control_characters_before_a_run_do_not_expose_its_prefix():
+    out = mask_credentials(chr(27) * 3965 + CANARY)
+    assert "<redacted>" in out and _no_canary_piece(out)
+
+
+def test_masked_text_normalizes_before_it_cuts():
+    out = masked_text(chr(27) * 1990 + CANARY, 2000)
+    assert "<redacted>" in out and _no_canary_piece(out)
+    assert masked_text("plain words", 60) == "plain words"

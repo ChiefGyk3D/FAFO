@@ -21,7 +21,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from .redact import mask_credentials, sanitize_text
+from .redact import masked_text, sanitize_text
 
 MODES = ("off", "activity", "prompt")
 TAIL_BYTES = 64 * 1024
@@ -230,7 +230,7 @@ def _describe(name: Any, inp: Any) -> str:
         kind = inp.get("subagent_type")
         obj = kind if type(kind) is str and _AGENT_RE.fullmatch(kind) else ""
     if obj:
-        obj = mask_credentials(sanitize_text(obj, 200))
+        obj = masked_text(obj, 200)
     return f"{name}: {obj}" if obj else name
 
 
@@ -331,7 +331,7 @@ def _last_prompt(data: bytes) -> str | None:
         text = _human_text(doc)
         if text is None:
             continue
-        text = mask_credentials(sanitize_text(_spaces(text[:2000]), 2000))
+        text = masked_text(_spaces(text), 2000)
         if not text:
             continue
         # Cut first: the phrase pass only ever sees PROMPT_CHARS characters.

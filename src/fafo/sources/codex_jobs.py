@@ -28,7 +28,7 @@ import stat
 from datetime import UTC, datetime
 
 from fafo.model import JobRow, JobSummary
-from fafo.redact import mask_credentials, sanitize_text
+from fafo.redact import masked_text
 from fafo.source import Ctx, SourceResult
 
 MAX_ENTRIES = 512  # directory entries examined, over the whole layout
@@ -183,9 +183,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _title(raw: str) -> str:
-    """Mask credentials over the whole title (the file cap already bounds it), then strip
-    control characters, then cut. Cutting first would let controls push a secret past the cut."""
-    return sanitize_text(mask_credentials(raw), MAX_TITLE)
+    """Strip control characters over the whole title (the file cap bounds it), then mask, then
+    cut. The order matters: the masker reads a bounded prefix, so controls must go first."""
+    return masked_text(raw, MAX_TITLE, MAX_FILE_BYTES)
 
 
 def _scan(fd: int, cap: int, extra_cap: int) -> tuple[list[tuple[str, int, float, bool]], int, int]:

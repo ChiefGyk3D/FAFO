@@ -379,16 +379,26 @@ def mask_credentials(text: str) -> str:
     For sources that hand over a finished command line: the argv is gone, so this is
     defense in depth, not allowlist redaction. Input is capped at 4 * MAX_REDACTED_LEN
     characters and every word is checked by the same bounded patterns as redact_argv.
+    Text past the cap is ignored. A word that the cap cuts may continue past it, so that
+    word is masked whole, never kept as a fragment. The cut is taken on the raw text, so
+    controls before it can leave a short piece; that piece is the cut word and is masked.
     """
     if not isinstance(text, str):
         return ""
-    words = _strip(text[: MAX_REDACTED_LEN * 4]).split()
+    head = text[: MAX_REDACTED_LEN * 4]
+    words = _strip(head).split()
+    cut_word = len(words) - 1 if len(text) > len(head) and words else -1
     out: list[str] = []
     mask_next = False
-    for raw in words[: MAX_TOKENS * 16]:
+    for index, raw in enumerate(words[: MAX_TOKENS * 16]):
         word = _normalize(raw)
         is_flag = word.startswith("-")
-        if (mask_next and not is_flag) or len(word) > MAX_TOKEN_LEN or _is_credential(word):
+        if (
+            index == cut_word
+            or (mask_next and not is_flag)
+            or len(word) > MAX_TOKEN_LEN
+            or _is_credential(word)
+        ):
             out.append(MASK)
         else:
             out.append(word)
@@ -397,3 +407,15 @@ def mask_credentials(text: str) -> str:
             is_flag and "=" not in word and _secret_name(word.lstrip("-"))
         )
     return " ".join(out)
+
+
+def masked_text(text: str, cap: int, bound: int = 64 * 1024) -> str:
+    """Normalize, then mask credentials, then cut to `cap`.
+
+    Controls are removed first, over the whole input up to `bound` characters (the size of
+    a job file), so that a cut never lands before them and a run is judged as the reader
+    sees it. Cutting before masking would leave a credential prefix that the masker cannot
+    recognize. Callers that display text cut by `cap` should use this, not sanitize_text
+    after mask_credentials on a pre-cut string.
+    """
+    return sanitize_text(mask_credentials(sanitize_text(text, bound)), cap)

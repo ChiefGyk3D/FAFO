@@ -632,3 +632,19 @@ def test_prompt_labels_clean_and_bounded_in_all_whitespace_cases(tmp_path):
         got = prompt_label(tmp_path, text)
         assert len(got) <= 80
         assert not any(ord(c) < 32 or ord(c) == 127 for c in got)
+
+
+def test_file_tool_basename_is_masked_before_the_200_cut(tmp_path):
+    """The basename is cut to 200 characters. A run that the cut split used to be shown as a
+    30-character piece (below the long-run threshold). It must be masked whole."""
+    canary = "A1b2C3d4" * 12 + "Zq9w"
+    put(tmp_path, [tool("Read", file_path="/" + "." * 170 + canary)])
+    got = label(tmp_path)
+    assert got == "Read: <redacted>"
+    assert canary[:8] not in got
+
+
+def test_prompt_controls_before_a_run_do_not_expose_its_prefix(tmp_path):
+    canary = "A1b2C3d4" * 12 + "Zq9w"
+    got = prompt_label(tmp_path, chr(27) * 1990 + canary)
+    assert got == "<redacted>"  # exact: an empty label (a swallowed error) must fail too
