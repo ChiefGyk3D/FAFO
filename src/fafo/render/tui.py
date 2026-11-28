@@ -904,7 +904,10 @@ class FafoApp(App[int]):
                 color, prefix = "waiting", "  "
             else:
                 color, prefix = str(it.b), "  "
-            t.append(prefix + fit(str(it.a), max(0, width - 2)), style_of(color, bg, kind == "head"))
+            t.append(
+                prefix + fit(str(it.a), max(0, width - cell_len(prefix))),
+                style_of(color, bg, kind == "head"),
+            )
             return t
         cells_fn = self.page.cells
         if cells_fn is None:

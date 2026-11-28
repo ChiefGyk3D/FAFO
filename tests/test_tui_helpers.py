@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from fafo.model import SNAPSHOT_VERSION, Proc, Session, Snapshot, Stamped
 from fafo.render import tui
 from fafo.render.tui import FafoApp
@@ -210,5 +212,33 @@ def test_hidden_helpers_are_counted_in_process_page_and_drill_in(tmp_path):
             # collapsed: no hidden-helpers row anywhere
             off = tui.build_procs_page(app.views, "", set())
             assert not any("more helpers" in str(i.a) for i in off.items)
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("width", [40, 80, 144])
+def test_helper_summary_and_other_text_rows_fit_the_width(tmp_path, width):
+    app = FafoApp(tmp_path / "snapshot.json", refresh_s=0.25)
+    long = "+300 helpers (" + ", ".join(f"cmd{i} x{i}" for i in range(60)) + ")"
+    for kind in ("helpers", "head", "more", "line"):
+        item = tui.Item(kind, (kind, "k"), long, "idle" if kind == "line" else True)
+        row = app._row(item, False, [], {}, width)
+        assert row.cell_len <= width, (kind, width, row.cell_len)
+    short = tui.Item("helpers", ("helpers", "k"), "+3 helpers (sleep x3)")
+    assert "+3 helpers (sleep x3)" in app._row(short, False, [], {}, width).plain
+
+
+@pytest.mark.parametrize("size", [(80, 24), (144, 40)])
+def test_helper_rows_in_the_running_pane_fit_the_width(tmp_path, size):
+    path = tmp_path / "snapshot.json"
+    write_snapshot(path, snapshot())
+
+    async def go():
+        app = FafoApp(path, refresh_s=0.25)
+        async with app.run_test(size=size) as pilot:
+            await wait_read(pilot, app)
+            text = lines(app)
+            assert any("helpers" in ln for ln in text)
+            assert max(len(ln) for ln in text) <= size[0]
 
     asyncio.run(go())
