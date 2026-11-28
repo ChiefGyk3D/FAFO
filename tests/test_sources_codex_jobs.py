@@ -26,6 +26,9 @@ BEL = chr(7)
 CTX = Ctx(cfg=SourceCfg(), clock=lambda: NOW, log=logging.getLogger("test.codex_jobs"))
 # Token-shaped and made up: a long mixed run that the credential masker must hide.
 FAKE_SECRET = "ghp_" + "A1b2C3d4" * 5
+# A 100-character token-shaped value built from pieces. It has no known credential prefix, so
+# only the long-run rule can mask it, and a 35-character prefix of it is too short to match.
+CANARY = "A1b2C3d4" * 12 + "Zq9w"
 
 
 def iso(offset_s: float) -> str:
@@ -150,7 +153,10 @@ def test_hostile_files_never_raise_or_leak(jd):
     text = repr(s)
     for leaked in ("LINKED", "GW", "OW", "BBBB"):
         assert leaked not in text
-    assert s.invalid >= 10
+    # 18 invalid: link.json, fifo.json, dir.json (non-regular), gw, ow (mode), big (size),
+    # nan, nan2, deep, deep2, enum, dup, types, boolpid, ts, top, bin, empty. ok and future
+    # are not invalid (future is a valid file outside the window).
+    assert s.invalid == 18
 
 
 def test_huge_title_with_controls_and_secret_is_bounded(jd):
@@ -158,6 +164,16 @@ def test_huge_title_with_controls_and_secret_is_bounded(jd):
     put(jd, "a.json", job("running", title=title))
     t = collect(jd, show_titles=True).jobs.rows[0].title
     assert len(t) <= 60 and FAKE_SECRET not in t and BEL not in t and ESC not in t
+
+
+def test_secret_behind_controls_is_masked_before_any_cut(jd):
+    """The 400-character slice used to run before masking: 365 control characters left only
+    the canary's first 35 characters, which the masker did not see as a credential."""
+    assert len(CANARY) == 100
+    put(jd, "a.json", job("running", title=ESC * 365 + CANARY))
+    t = collect(jd, show_titles=True).jobs.rows[0].title
+    assert "<redacted>" in t
+    assert not any(CANARY[i : i + 12] in t for i in range(len(CANARY) - 11))
 
 
 def test_hostile_labels_are_dropped(jd):
@@ -198,6 +214,87 @@ def test_read_cap_counts_unexamined(jd, monkeypatch):
         put(jd, f"j{i}.json", job("completed", completed=-10))
     s = collect(jd).jobs
     assert s.done == 3 and s.unread == 5
+
+
+def test_descriptors_stay_bounded_across_many_id_dirs(jd, monkeypatch):
+    """400 made-up <id>/jobs folders. Peak open descriptors must stay at root + one subdirectory
+    + one jobs folder, not two per id, and the results must not change."""
+    for i in range(400):
+        sub = jd / f"id{i:03}" / "jobs"
+        sub.mkdir(parents=True)
+        if i % 10 == 0:
+            put(sub, "j.json", job("completed", completed=-10))
+    live: set[int] = set()
+    peak = [0]
+    real_open, real_close = os.open, os.close
+
+    def counting_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        live.add(fd)
+        peak[0] = max(peak[0], len(live))
+        return fd
+
+    def counting_close(fd):
+        live.discard(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(codex_jobs.os, "open", counting_open)
+    monkeypatch.setattr(codex_jobs.os, "close", counting_close)
+    s = collect(jd).jobs
+    assert (s.done, s.invalid, s.unread) == (40, 0, 0)
+    assert 2 <= peak[0] <= 3
+
+
+def test_entry_scan_stops_after_cap_even_when_stat_fails(jd, monkeypatch):
+    """Entries whose stat() fails used to be free, so a 100000-entry listing was read whole.
+    Every entry pulled counts against the cap before stat is tried."""
+    pulled = [0]
+
+    class Entry:
+        def __init__(self, i: int) -> None:
+            self.name = f"e{i}.json"
+
+        def stat(self, follow_symlinks: bool = True):
+            raise OSError("vanished")
+
+    class Listing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def __iter__(self):
+            for i in range(100_000):
+                pulled[0] += 1
+                yield Entry(i)
+
+    monkeypatch.setattr(codex_jobs.os, "scandir", lambda _fd: Listing())
+    s = collect(jd).jobs
+    assert pulled[0] == codex_jobs.MAX_ENTRIES + codex_jobs.MAX_COUNT_EXTRA
+    assert (s.done, s.unread) == (0, codex_jobs.MAX_COUNT_EXTRA)
+
+
+def test_non_regular_json_entries_count_invalid_without_open(jd, monkeypatch):
+    """A symlink, a FIFO and a directory named *.json are counted invalid; none is opened."""
+    put(jd, "ok.json", job("running"))
+    target = jd.parent / "target.json"
+    target.write_text(json.dumps(job("running", title="LINKED")))
+    (jd / "link.json").symlink_to(target)
+    os.mkfifo(jd / "fifo.json")
+    (jd / "dir.json").mkdir()
+    opened: list[str] = []
+    real_open = os.open
+
+    def spy(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(codex_jobs.os, "open", spy)
+    s = collect(jd, show_titles=True).jobs
+    assert (s.running, s.invalid) == (1, 3)
+    assert not {"link.json", "fifo.json", "dir.json"} & set(opened)
+    assert "LINKED" not in repr(s)
 
 
 def test_non_json_names_ignored(jd):

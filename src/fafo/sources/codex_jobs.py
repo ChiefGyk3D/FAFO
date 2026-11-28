@@ -9,11 +9,13 @@ The files are untrusted bytes. Names come from one directory listing (capped), e
 opened with no-follow relative to its directory descriptor and judged on the descriptor
 (regular file, owned by this user, not group or world writable, at most 64 KB). The JSON is
 scanned for nesting depth before it is parsed, refuses duplicate keys and NaN, and is checked
-against a fixed schema. A file that fails any of this is counted as invalid and never shown.
+against a fixed schema. A file that fails any of this is counted as invalid and never shown. A
+`*.json` entry that is not a regular file (symlink, FIFO, directory, device) is counted as invalid
+from its listing and is never opened.
 
 Titles may hold prompt text, so they are hidden unless `show_titles` is set; shown titles are
-credential-masked, stripped of control characters and cut to 60 characters. Titles are never
-logged. Counts (running, done, failed) are always produced.
+credential-masked over the whole title, stripped of control characters and cut to 60 characters.
+Titles are never logged. Counts (running, done, failed) are always produced.
 """
 
 from __future__ import annotations
@@ -30,13 +32,13 @@ from fafo.redact import mask_credentials, sanitize_text
 from fafo.source import Ctx, SourceResult
 
 MAX_ENTRIES = 512  # directory entries examined, over the whole layout
-MAX_COUNT_EXTRA = 4096  # entries counted (not examined) beyond MAX_ENTRIES
+MAX_JOB_ENTRIES = 128  # directory entries examined inside one `<id>/jobs` folder
+MAX_COUNT_EXTRA = 4096  # entries counted (not examined) beyond the caps
 MAX_READ = 128  # files opened per collect, newest first
 MAX_ROWS = 64  # rows kept in the snapshot
 MAX_FILE_BYTES = 64 * 1024
 MAX_DEPTH = 8
 MAX_TITLE = 60
-MAX_TITLE_RAW = 400
 MAX_LABEL = 24
 DEFAULT_WINDOW_MIN = 60
 MAX_WINDOW_MIN = 1440
@@ -181,27 +183,36 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _title(raw: str) -> str:
-    return sanitize_text(mask_credentials(raw[:MAX_TITLE_RAW]), MAX_TITLE)
+    """Mask credentials over the whole title (the file cap already bounds it), then strip
+    control characters, then cut. Cutting first would let controls push a secret past the cut."""
+    return sanitize_text(mask_credentials(raw), MAX_TITLE)
 
 
-def _list_dir(fd: int, budget: int) -> tuple[list[tuple[str, int, float, bool]], int]:
-    """(name, mode, mtime, is_dir) per entry, lstat only, at most `budget`; and the count of
-    entries seen beyond the budget (itself bounded)."""
+def _scan(fd: int, cap: int, extra_cap: int) -> tuple[list[tuple[str, int, float, bool]], int, int]:
+    """Entries of one folder: (name, mode, mtime, is_dir) for each entry examined (lstat only),
+    the number examined, and the number seen beyond the cap (at most extra_cap).
+
+    Every entry pulled from scandir counts against the cap before its stat is tried, so entries
+    whose stat fails still use the budget. The loop stops once both budgets are spent."""
     out: list[tuple[str, int, float, bool]] = []
+    examined = 0
     extra = 0
-    with os.scandir(fd) as it:
-        for entry in it:
-            if len(out) >= budget:
+    with os.scandir(fd) as listing:
+        feed = iter(listing)
+        while examined < cap or extra < extra_cap:
+            entry = next(feed, None)
+            if entry is None:
+                break
+            if examined >= cap:
                 extra += 1
-                if extra >= MAX_COUNT_EXTRA:
-                    break
                 continue
+            examined += 1
             try:
                 st = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
             out.append((entry.name, st.st_mode, st.st_mtime, stat.S_ISDIR(st.st_mode)))
-    return out, extra
+    return out, examined, extra
 
 
 def _open_dir(name: str, dir_fd: int | None) -> int:
@@ -210,42 +221,63 @@ def _open_dir(name: str, dir_fd: int | None) -> int:
     return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
 
 
-def _candidates(root: str) -> tuple[list[tuple[float, int, str]], int, list[int]]:
-    """(mtime, directory descriptor, file name) for each candidate *.json, newest first, the
-    number of entries not examined, and the open descriptors (the caller closes them)."""
-    found: list[tuple[float, int, str]] = []
-    extra = 0
-    opened: list[int] = []
+def _open_jobs(root_fd: int, name: str) -> int:
+    """Descriptor of `<name>/jobs`, opened relative to root_fd. The `<name>` descriptor is closed
+    before return, so only the jobs descriptor is handed back (the caller closes it)."""
+    sub_fd = _open_dir(name, root_fd)
     try:
-        root_fd = _open_dir(root, None)
-        opened.append(root_fd)
-        entries, extra = _list_dir(root_fd, MAX_ENTRIES)
-        budget = MAX_ENTRIES - len(entries)
-        for name, mode, mtime, is_dir in entries:
-            if stat.S_ISREG(mode) and name.endswith(".json"):
-                found.append((mtime, root_fd, name))
-            elif is_dir and budget > 0:
-                try:
-                    sub = _open_dir(name, root_fd)
-                    opened.append(sub)
-                    jobs = _open_dir("jobs", sub)
-                    opened.append(jobs)
-                except OSError:
-                    continue
-                sub_entries, sub_extra = _list_dir(jobs, budget)
-                budget -= len(sub_entries)
-                extra += sub_extra
-                found.extend(
-                    (m, jobs, n)
-                    for n, md, m, d in sub_entries
-                    if stat.S_ISREG(md) and n.endswith(".json")
+        return _open_dir("jobs", sub_fd)
+    finally:
+        os.close(sub_fd)
+
+
+def _open_job(root_fd: int, sub: str, name: str) -> int:
+    """No-follow open of one candidate file. Any folder descriptor used on the way is closed."""
+    if not sub:
+        return os.open(name, _FILE_FLAGS, dir_fd=root_fd)
+    jobs_fd = _open_jobs(root_fd, sub)
+    try:
+        return os.open(name, _FILE_FLAGS, dir_fd=jobs_fd)
+    finally:
+        os.close(jobs_fd)
+
+
+def _candidates(root_fd: int) -> tuple[list[tuple[float, str, str]], int, int]:
+    """(mtime, subfolder or "", file name) for each candidate *.json, newest first; the number of
+    entries not examined; and the number of *.json entries that are not regular files (counted,
+    never opened). At most one `<id>/jobs` folder is open at a time, and it is closed before the
+    next one is opened."""
+    found: list[tuple[float, str, str]] = []
+    entries, examined, extra = _scan(root_fd, MAX_ENTRIES, MAX_COUNT_EXTRA)
+    remaining = MAX_ENTRIES - examined
+    invalid = 0
+    for name, mode, mtime, is_dir in entries:
+        if name.endswith(".json"):
+            if stat.S_ISREG(mode):
+                found.append((mtime, "", name))
+            else:
+                invalid += 1
+        elif is_dir and remaining > 0:
+            try:
+                jobs_fd = _open_jobs(root_fd, name)
+            except OSError:
+                continue
+            try:
+                sub, sub_examined, sub_extra = _scan(
+                    jobs_fd, min(remaining, MAX_JOB_ENTRIES), MAX_COUNT_EXTRA - extra
                 )
-    except BaseException:
-        for fd in opened:
-            os.close(fd)
-        raise
+            finally:
+                os.close(jobs_fd)
+            remaining -= sub_examined
+            extra += sub_extra
+            for sub_name, sub_mode, sub_mtime, _ in sub:
+                if sub_name.endswith(".json"):
+                    if stat.S_ISREG(sub_mode):
+                        found.append((sub_mtime, name, sub_name))
+                    else:
+                        invalid += 1
     found.sort(key=lambda t: t[0], reverse=True)
-    return found, extra, opened
+    return found, extra, invalid
 
 
 class CodexJobsSource:
@@ -282,16 +314,19 @@ class CodexJobsSource:
     def collect(self, ctx: Ctx) -> SourceResult:
         now = ctx.clock()
         try:
-            found, extra, fds = _candidates(self.jobs_dir)
+            root_fd = _open_dir(self.jobs_dir, None)
         except OSError:
             return SourceResult(status="absent")
-        counts = {"running": 0, "done": 0, "failed": 0}
-        invalid = 0
-        rows: list[tuple[int, float, JobRow]] = []
         try:
-            for _mtime, dfd, fname in found[:MAX_READ]:
+            try:
+                found, extra, invalid = _candidates(root_fd)
+            except OSError:
+                return SourceResult(status="absent")
+            counts = {"running": 0, "done": 0, "failed": 0}
+            rows: list[tuple[int, float, JobRow]] = []
+            for _mtime, sub, fname in found[:MAX_READ]:
                 try:
-                    fd = os.open(fname, _FILE_FLAGS, dir_fd=dfd)
+                    fd = _open_job(root_fd, sub, fname)
                 except OSError:
                     invalid += 1
                     continue
@@ -321,8 +356,7 @@ class CodexJobsSource:
                     )
                 )
         finally:
-            for fd in fds:
-                os.close(fd)
+            os.close(root_fd)
         rows.sort(key=lambda t: (t[0], t[1]))
         unread = extra + max(0, len(found) - MAX_READ)
         summary = JobSummary(
