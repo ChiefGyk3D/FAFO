@@ -98,3 +98,30 @@ def test_pypi_job_is_gated_and_direct():
     assert "startsWith(github.ref, 'refs/tags/v')" in text
     assert re.search(r"uses: pypa/gh-action-pypi-publish@[0-9a-f]{40} # v\d+\.\d+\.\d+", text)
     assert "environment:" in text and "name: pypi" in text
+
+
+# pypa/gh-action-pypi-publish v1.14.2 is affected by GHSA-5xjx-3w67-w9x9 (a revoked CA in the Sigstore
+# chain used for attestations); v1.14.3 is the fix. No workflow may name the vulnerable commit.
+VULNERABLE_COMMITS = ("dc37677b2e1c63e2034f94d8a5b11f265b73ba33",)
+
+
+def vulnerable_hits(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    return [c for c in VULNERABLE_COMMITS if c in text]
+
+
+def test_no_workflow_names_a_vulnerable_commit():
+    files = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    assert len(files) >= 2  # something was collected
+    assert {f: vulnerable_hits(f) for f in files if vulnerable_hits(f)} == {}
+
+
+def test_vulnerable_commit_guard_bites(tmp_path):
+    bad = tmp_path / "x.yml"
+    bad.write_text(
+        "      - uses: pypa/gh-action-pypi-publish@" + VULNERABLE_COMMITS[0] + " # v1.14.2\n", encoding="utf-8"
+    )
+    assert vulnerable_hits(bad) == [VULNERABLE_COMMITS[0]]
+    ok = tmp_path / "y.yml"
+    ok.write_text("      - uses: pypa/gh-action-pypi-publish@" + "7" * 40 + " # v1.14.3\n", encoding="utf-8")
+    assert vulnerable_hits(ok) == []
