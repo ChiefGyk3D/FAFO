@@ -904,6 +904,10 @@ class FafoApp(App[int]):
                 color, prefix = "waiting", "  "
             else:
                 color, prefix = str(it.b), "  "
+            if width <= 0:
+                return t  # no room for anything
+            if width < cell_len(prefix):
+                prefix = set_cell_size(prefix, width)  # a narrow terminal clips the prefix too
             t.append(
                 prefix + fit(str(it.a), max(0, width - cell_len(prefix))),
                 style_of(color, bg, kind == "head"),

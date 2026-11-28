@@ -216,16 +216,20 @@ def test_hidden_helpers_are_counted_in_process_page_and_drill_in(tmp_path):
     asyncio.run(go())
 
 
-@pytest.mark.parametrize("width", [40, 80, 144])
+@pytest.mark.parametrize("width", [-3, 0, 1, 2, 4, 7, 8, 9, 40, 80, 144])
 def test_helper_summary_and_other_text_rows_fit_the_width(tmp_path, width):
     app = FafoApp(tmp_path / "snapshot.json", refresh_s=0.25)
     long = "+300 helpers (" + ", ".join(f"cmd{i} x{i}" for i in range(60)) + ")"
     for kind in ("helpers", "head", "more", "line"):
-        item = tui.Item(kind, (kind, "k"), long, "idle" if kind == "line" else True)
-        row = app._row(item, False, [], {}, width)
-        assert row.cell_len <= width, (kind, width, row.cell_len)
+        for flag in (True, False):  # the twisty differs for an open and a shut head
+            item = tui.Item(kind, (kind, "k"), long, "idle" if kind == "line" else flag)
+            row = app._row(item, False, [], {}, width)
+            assert row.cell_len <= max(0, width), (kind, width, row.cell_len)
+    if width < 1:
+        return
     short = tui.Item("helpers", ("helpers", "k"), "+3 helpers (sleep x3)")
-    assert "+3 helpers (sleep x3)" in app._row(short, False, [], {}, width).plain
+    if width >= 40:
+        assert "+3 helpers (sleep x3)" in app._row(short, False, [], {}, width).plain
 
 
 @pytest.mark.parametrize("size", [(80, 24), (144, 40)])
