@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import threading
 from dataclasses import fields
@@ -19,6 +20,14 @@ from fafo.model import (
     Stamped,
 )
 from fafo.store import read_snapshot, write_snapshot
+
+
+@pytest.fixture(autouse=True)
+def _private_umask():
+    """Hand-written fixture files must be owner-only, like the writer's output; the reader insists."""
+    old = os.umask(0o077)
+    yield
+    os.umask(old)
 
 
 def make_snapshot(taken: float = 1000.0) -> Snapshot:
@@ -666,3 +675,118 @@ def test_default_live_snapshot_has_the_pre_project_source_key_set(tmp_path: Path
     assert json.loads(path.read_text())["sessions"][0]["project_source"] == "last"
     got = read_snapshot(path)
     assert got is not None and got.sessions[0].project_source == "last"
+
+
+# ---- bounded, validated snapshot open ----
+
+def _written(tmp_path: Path) -> Path:
+    p = tmp_path / "snap.json"
+    write_snapshot(p, make_snapshot())
+    return p
+
+
+def _read_with_deadline(path: Path, seconds: float = 2.0):
+    """Run the reader in a daemon thread so a regression fails instead of hanging."""
+    out: list = []
+    t = threading.Thread(target=lambda: out.append(read_snapshot(path)), daemon=True)
+    t.start()
+    t.join(seconds)
+    assert not t.is_alive(), "read_snapshot blocked"
+    return out[0]
+
+
+def test_normal_and_writer_mode_snapshot_still_reads(tmp_path):
+    p = _written(tmp_path)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert read_snapshot(p) is not None
+
+
+def test_fifo_snapshot_refused_without_blocking(tmp_path):
+    import os
+
+    p = tmp_path / "fifo.json"
+    os.mkfifo(p)
+    assert _read_with_deadline(p) is None
+
+
+def test_symlink_snapshot_refused(tmp_path):
+    real = _written(tmp_path)
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    assert read_snapshot(real) is not None  # negative control: the target itself reads
+    assert read_snapshot(link) is None
+
+
+def test_directory_snapshot_refused(tmp_path):
+    assert read_snapshot(tmp_path) is None
+
+
+def test_group_or_other_readable_snapshot_refused(tmp_path):
+    p = _written(tmp_path)
+    for mode in (0o640, 0o604, 0o660, 0o606):
+        p.chmod(mode)
+        assert read_snapshot(p) is None, oct(mode)
+    p.chmod(0o400)
+    assert read_snapshot(p) is not None
+
+
+def test_oversized_snapshot_refused_without_reading_it_all(tmp_path, monkeypatch):
+    import os
+
+    import fafo.store as store
+
+    p = tmp_path / "big.json"
+    with open(p, "wb") as f:
+        f.truncate(store.MAX_SNAPSHOT_BYTES + 1)  # sparse
+    p.chmod(0o600)
+    real_read = os.read
+    total = [0]
+
+    def spy(fd, n):
+        data = real_read(fd, n)
+        total[0] += len(data)
+        return data
+
+    monkeypatch.setattr(store.os, "read", spy)
+    assert read_snapshot(p) is None
+    assert total[0] <= store.MAX_SNAPSHOT_BYTES
+
+
+def test_growing_file_is_cut_off_at_the_cap(tmp_path, monkeypatch):
+    """fstat says small, but the read stream is endless: the loop bound still refuses."""
+    import os
+
+    import fafo.store as store
+
+    p = _written(tmp_path)
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 100)
+    real_fstat = os.fstat
+
+    class Fake:
+        def __init__(self, st):
+            self._st = st
+
+        def __getattr__(self, name):
+            return 10 if name == "st_size" else getattr(self._st, name)
+
+    monkeypatch.setattr(store.os, "fstat", lambda fd: Fake(real_fstat(fd)))
+    assert read_snapshot(p) is None
+
+
+def test_wrong_owner_snapshot_refused(tmp_path, monkeypatch):
+    import os
+
+    import fafo.store as store
+
+    p = _written(tmp_path)
+    real_fstat = os.fstat
+
+    class Fake:
+        def __init__(self, st):
+            self._st = st
+
+        def __getattr__(self, name):
+            return os.geteuid() + 1 if name == "st_uid" else getattr(self._st, name)
+
+    monkeypatch.setattr(store.os, "fstat", lambda fd: Fake(real_fstat(fd)))
+    assert read_snapshot(p) is None

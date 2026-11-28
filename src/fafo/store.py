@@ -295,10 +295,41 @@ def _snapshot(doc) -> Snapshot:
     )
 
 
+# Largest snapshot file the reader accepts: twice the 2 MiB export cap, since a snapshot carries
+# every source's rows before the export trims them. Anything bigger is refused unread.
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _read_bounded(path: Path) -> bytes:
+    """Read the file at `path` or raise OSError: a regular, owner-only file within the size cap."""
+    fd = os.open(path, _OPEN_FLAGS)  # no-follow and non-blocking: a FIFO or link cannot hang us
+    try:
+        st = os.fstat(fd)
+        if (
+            not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.geteuid()
+            or stat.S_IMODE(st.st_mode) & (stat.S_IRWXG | stat.S_IRWXO)
+            or st.st_size > MAX_SNAPSHOT_BYTES
+        ):
+            raise OSError("snapshot file refused")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_SNAPSHOT_BYTES:
+            chunk = os.read(fd, min(65536, MAX_SNAPSHOT_BYTES + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+        raise OSError("snapshot file too large")
+    finally:
+        os.close(fd)
+
+
 def read_snapshot(path: Path) -> Snapshot | None:
     """Return the snapshot, or None if missing, truncated, invalid or an unknown version."""
     try:
-        doc = json.loads(Path(path).read_bytes(), parse_constant=_refuse_constant)
+        doc = json.loads(_read_bounded(path), parse_constant=_refuse_constant)
         return _snapshot(doc)
     except (
         OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
