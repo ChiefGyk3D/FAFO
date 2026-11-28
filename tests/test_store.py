@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from fafo import store
 from fafo.model import (
     SNAPSHOT_VERSION,
     Inflight,
@@ -702,8 +703,6 @@ def test_normal_and_writer_mode_snapshot_still_reads(tmp_path):
 
 
 def test_fifo_snapshot_refused_without_blocking(tmp_path):
-    import os
-
     p = tmp_path / "fifo.json"
     os.mkfifo(p)
     assert _read_with_deadline(p) is None
@@ -731,10 +730,6 @@ def test_group_or_other_readable_snapshot_refused(tmp_path):
 
 
 def test_oversized_snapshot_refused_without_reading_it_all(tmp_path, monkeypatch):
-    import os
-
-    import fafo.store as store
-
     p = tmp_path / "big.json"
     with open(p, "wb") as f:
         f.truncate(store.MAX_SNAPSHOT_BYTES + 1)  # sparse
@@ -754,10 +749,6 @@ def test_oversized_snapshot_refused_without_reading_it_all(tmp_path, monkeypatch
 
 def test_growing_file_is_cut_off_at_the_cap(tmp_path, monkeypatch):
     """fstat says small, but the read stream is endless: the loop bound still refuses."""
-    import os
-
-    import fafo.store as store
-
     p = _written(tmp_path)
     monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 100)
     real_fstat = os.fstat
@@ -774,10 +765,6 @@ def test_growing_file_is_cut_off_at_the_cap(tmp_path, monkeypatch):
 
 
 def test_wrong_owner_snapshot_refused(tmp_path, monkeypatch):
-    import os
-
-    import fafo.store as store
-
     p = _written(tmp_path)
     real_fstat = os.fstat
 
