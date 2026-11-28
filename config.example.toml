@@ -29,7 +29,8 @@ show_args = ["exec", "resume", "--resume", "--model"]
 # Fold boring helper processes (sleep, tail, shells and the like) into one summary row per
 # session, such as "+16 helpers (sleep x6, bash x4, cat x3)". A boring process still shows when
 # it uses 5 percent CPU or more, or when something that is not boring runs below it. In the
-# terminal UI, Enter or x on the summary row shows the full list for that session.
+# terminal UI, Enter or x on the summary row lists up to 256 of that session's helpers, followed
+# by a row that counts the ones not shown.
 collapse_helpers = true
 
 # Program names (the basename of the first word of the command) that count as boring.
@@ -92,7 +93,8 @@ enabled = true
 ## name: 1-32 characters from A-Z a-z 0-9 . _ - and unique. A single url (above) is one server
 ## named "ollama". admission_log is optional per server.
 ## timeout_s covers one collect of all servers (they are polled in parallel): each server's
-## poll (two requests) gets min(6, timeout_s minus 0.5) seconds.
+## poll (two requests) gets min(6, timeout_s minus 0.5) seconds, always less than timeout_s.
+## The smallest accepted timeout_s for this source is 1 second; anything lower is refused.
 # [sources.ollama]
 # interval_s = 5
 # timeout_s = 4

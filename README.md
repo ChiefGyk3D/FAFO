@@ -115,7 +115,7 @@ anything, copy `config.example.toml` somewhere and pass it with `--config PATH` 
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
 Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
-dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds (so 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
+dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds, always less than `timeout_s` (the Ollama `timeout_s` must be at least 1 second, a lower value is refused; 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
 
 Helper processes: a session that runs many short helpers (`sleep`, `tail`, shells) would fill
 the screen, so the table, the terminal UI and the Claude pane show one summary row per session,
@@ -123,8 +123,8 @@ for example `+16 helpers (sleep x6, bash x4, cat x3)` (the count is exact, the t
 names are listed). A helper stays visible when it uses 5 percent CPU or more, or when a process
 that is not boring runs below it. Set `collapse_helpers = false` to turn this off, or change the
 `boring_procs` list (program basenames, at most 64 of 1-32 characters from `A-Za-z0-9._-`).
-In the terminal UI, Enter or `x` on the summary row shows the full list for that session and
-toggles it back; the session screen always lists every process. The pane reads `collapsed` and
+In the terminal UI, Enter or `x` on the summary row lists up to 256 of that session's helpers, followed by a
+row counting any not shown, and toggles it back; the session screen always lists every process. The pane reads `collapsed` and
 `collapsed_names` from `views.json` (additive fields, schema unchanged).
 
 ### Task labels

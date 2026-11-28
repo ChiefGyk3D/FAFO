@@ -19,6 +19,7 @@ DEFAULT_ENABLED = ("host", "claude", "codex", "gemini")
 DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
+OLLAMA_MIN_TIMEOUT_S = 1.0  # smallest sources.ollama.timeout_s: two requests need a real budget
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
 # Shown flags whose next token is a value to show; a shown flag not listed here is boolean.
 DEFAULT_SHOW_VALUE_ARGS = ("--model", "--resume")
@@ -316,14 +317,19 @@ def _parse_sources(raw: object) -> dict[str, SourceCfg]:
         enabled = body.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(f"sources.{name}.enabled must be true or false")
+        timeout_s = _positive_number(
+            body.get("timeout_s", DEFAULT_TIMEOUT_S), f"sources.{name}.timeout_s"
+        )
+        if name == "ollama" and timeout_s < OLLAMA_MIN_TIMEOUT_S:
+            raise ConfigError(
+                f"sources.ollama.timeout_s must be at least {OLLAMA_MIN_TIMEOUT_S:g} second"
+            )
         out[name] = SourceCfg(
             enabled=enabled,
             interval_s=_positive_number(
                 body.get("interval_s", DEFAULT_INTERVAL_S), f"sources.{name}.interval_s"
             ),
-            timeout_s=_positive_number(
-                body.get("timeout_s", DEFAULT_TIMEOUT_S), f"sources.{name}.timeout_s"
-            ),
+            timeout_s=timeout_s,
             options=_parse_options(name, body),
         )
     return out

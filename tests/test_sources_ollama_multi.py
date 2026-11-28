@@ -362,14 +362,19 @@ def test_slowish_healthy_server_in_real_time_is_waited_for_the_whole_poll_budget
 
 @pytest.mark.parametrize(
     ("timeout_s", "expected"),
-    [(3.0, 2.5), (5.0, 4.5), (6.5, 6.0), (10.0, 6.0), (0.1, ollama_mod.MIN_POLL_S)],
+    [(3.0, 2.5), (5.0, 4.5), (6.5, 6.0), (10.0, 6.0), (1.0, 0.5), (0.1, 0.05)],
 )
 def test_poll_deadline_is_min_of_ceiling_and_timeout_minus_margin(timeout_s, expected):
     assert ollama_mod.poll_deadline(timeout_s) == expected
     assert ollama_mod.POLL_DEADLINE_S == 6.0 and ollama_mod.WAIT_MARGIN_S == 0.5
 
 
-@pytest.mark.parametrize("timeout_s", [1.0, 2.0, 3.0])
+@pytest.mark.parametrize("timeout_s", [0.1, 0.3, 0.5, 0.7, 1.0, 1.4, 2.0, 3.0, 5.0, 7.0, 100.0])
+def test_poll_deadline_is_always_strictly_inside_the_outer_timeout(timeout_s):
+    assert 0 < ollama_mod.poll_deadline(timeout_s) < timeout_s
+
+
+@pytest.mark.parametrize("timeout_s", [0.3, 0.7, 1.0, 2.0, 3.0])
 def test_collect_never_outlasts_the_configured_timeout_when_every_request_hangs(timeout_s):
     release = threading.Event()
     src = OllamaSource(
