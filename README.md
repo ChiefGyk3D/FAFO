@@ -76,6 +76,16 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+Helper processes: a session that runs many short helpers (`sleep`, `tail`, shells) would fill
+the screen, so the table, the terminal UI and the Claude pane show one summary row per session,
+for example `+16 helpers (sleep x6, bash x4, cat x3)` (the count is exact, the three most common
+names are listed). A helper stays visible when it uses 5 percent CPU or more, or when a process
+that is not boring runs below it. Set `collapse_helpers = false` to turn this off, or change the
+`boring_procs` list (program basenames, at most 64 of 1-32 characters from `A-Za-z0-9._-`).
+In the terminal UI, Enter or `x` on the summary row shows the full list for that session and
+toggles it back; the session screen always lists every process. The pane reads `collapsed` and
+`collapsed_names` from `views.json` (additive fields, schema unchanged).
+
 ### Task labels
 
 The TASK column of a Claude session shows what it is doing. By default (`task_labels =

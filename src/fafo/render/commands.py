@@ -27,7 +27,7 @@ from ..model import Session
 from ..redact import sanitize_text
 from ..store import read_snapshot
 from .table import format_json, format_sessions, format_table
-from .view import build_views
+from .view import HelperPolicy, build_views, policy_from_config
 
 EXIT_OK, EXIT_USAGE = 0, 2
 MAX_HOPS = 64
@@ -142,6 +142,10 @@ def _snapshot_path(args: argparse.Namespace) -> Path:
     return cfg.snapshot_path
 
 
+def _helper_policy(args: argparse.Namespace) -> HelperPolicy:
+    return policy_from_config(load_config(args.config))
+
+
 def _clean(text: str) -> str:
     """Strip control characters and escape sequences from every line of output text."""
     lines = text.split("\n")
@@ -156,7 +160,7 @@ def _emit(text: str) -> None:
 def _cmd_table(args: argparse.Namespace) -> int:
     snap = read_snapshot(_snapshot_path(args))
     sid = _current_id(args.session, snap)
-    views = build_views(snap, _now(), current_session_id=sid)
+    views = build_views(snap, _now(), current_session_id=sid, helpers=_helper_policy(args))
     width = args.width if args.width is not None else default_width()
     _emit(_clean(format_table(views, width)))
     return EXIT_OK
@@ -186,7 +190,7 @@ def _cmd_tui(args: argparse.Namespace) -> int:
         print(TUI_HINT, file=sys.stderr)
         return EXIT_USAGE
     sid = _current_id(args.session, read_snapshot(path) if args.session == "auto" else None)
-    return run_tui(path, sid, args.refresh)
+    return run_tui(path, sid, args.refresh, _helper_policy(args))
 
 
 # ---- registration --------------------------------------------------------------------------

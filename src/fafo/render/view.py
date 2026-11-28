@@ -9,9 +9,11 @@ touches the filesystem, through store.read_snapshot.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..config import DEFAULT_BORING_PROCS as DEFAULT_BORING
 from ..model import Proc, Session, Snapshot
 from ..redact import sanitize_text
 from ..store import read_snapshot
@@ -22,6 +24,9 @@ MAX_GROUP_ROWS = 256
 MAX_RUNNERS = 64
 MAX_MODELS = 32
 MAX_QUOTA = 32
+
+HOT_CPU = 5.0  # percent: a boring process at or above this stays visible
+MAX_HELPER_NAMES = 3
 
 UNKNOWN = "?"
 NO_COLLECTOR_TEXT = "collector not running"
@@ -130,6 +135,27 @@ class ProcNode:
     age: str = ""
 
 
+@dataclass(frozen=True)
+class HelperPolicy:
+    """Which of a session's processes collapse into one summary row."""
+
+    collapse: bool = True
+    boring: frozenset[str] = frozenset(DEFAULT_BORING)
+
+
+def policy_from_config(cfg: object) -> HelperPolicy:
+    """The policy for a loaded Config (its two helper options)."""
+    return HelperPolicy(
+        collapse=bool(getattr(cfg, "collapse_helpers", True)),
+        boring=frozenset(getattr(cfg, "boring_procs", DEFAULT_BORING)),
+    )
+
+
+def helper_summary(count: int, names: list[str]) -> str:
+    """`+16 helpers (sleep x6, bash x4, cat x3)`; count is the exact number collapsed."""
+    return f"+{count} helpers ({', '.join(names)})"
+
+
 @dataclass
 class SessionNode:
     name: str
@@ -151,6 +177,12 @@ class SessionNode:
     age: str = ""
     children: list[ProcNode] = field(default_factory=list)
     children_hidden: int = 0
+    # Boring helper processes folded into one summary row (see HelperPolicy). `collapsed` is
+    # the exact count; `helpers` keeps the rows for the TUI expand (capped, never exported).
+    collapsed: int = 0
+    collapsed_names: list[str] = field(default_factory=list)
+    helpers: list[ProcNode] = field(default_factory=list)
+    helpers_hidden: int = 0
     project_source: str = "live"
 
 
@@ -319,6 +351,35 @@ def _session_node(
     )
 
 
+def _exe(cmd: str) -> str:
+    """Basename of the first word of a command line ("" for an empty one)."""
+    words = cmd.split(None, 1)
+    return words[0].rsplit("/", 1)[-1] if words else ""
+
+
+def _split_helpers(procs: list[Proc], policy: HelperPolicy) -> tuple[list[Proc], list[Proc]]:
+    """(visible, collapsed). A process collapses only when its program is boring, it is under
+    HOT_CPU with a known cpu figure, and nothing visible hangs below it (ancestors of a
+    visible process stay visible, so a boring wrapper never hides the real work under it)."""
+    if not policy.collapse:
+        return procs, []
+    by_pid = {p.pid: p for p in procs}
+    keep: set[int] = set()
+    for p in procs:
+        cpu = _num(p.cpu)
+        if _exe(p.cmd) not in policy.boring or cpu is None or cpu >= HOT_CPU:
+            keep.add(p.pid)
+    for pid in list(keep):
+        cur = by_pid[pid].ppid
+        for _ in range(len(procs)):  # bounded walk: a ppid cycle cannot loop forever
+            parent = by_pid.get(cur)
+            if parent is None or parent.pid in keep:
+                break
+            keep.add(parent.pid)
+            cur = parent.ppid
+    return [p for p in procs if p.pid in keep], [p for p in procs if p.pid not in keep]
+
+
 def _sort_key(n: SessionNode) -> tuple:
     return (
         not n.is_current,
@@ -355,7 +416,9 @@ def build_views(
     current_session_id: str | None = None,
     stale_after_s: float = 15.0,
     dead_after_s: float = 60.0,
+    helpers: HelperPolicy | None = None,
 ) -> Views:
+    policy = helpers if helpers is not None else HelperPolicy()
     status, age = _snapshot_status(snap, now, stale_after_s, dead_after_s)
     if snap is None:
         return Views(
@@ -413,8 +476,15 @@ def build_views(
     shown = ordered[:MAX_SESSIONS]
     for node in shown:
         procs = sorted(owned.get(node.pid, []), key=lambda p: p.pid)
-        node.children = [_proc_node(p, all_stale, snap_age) for p in procs[:MAX_CHILDREN]]
-        node.children_hidden = max(0, len(procs) - MAX_CHILDREN)
+        visible, folded = _split_helpers(procs, policy)
+        node.children = [_proc_node(p, all_stale, snap_age) for p in visible[:MAX_CHILDREN]]
+        node.children_hidden = max(0, len(visible) - MAX_CHILDREN)
+        if folded:
+            top = sorted(Counter(_exe(p.cmd) for p in folded).items(), key=lambda kv: (-kv[1], kv[0]))
+            node.collapsed = len(folded)
+            node.collapsed_names = [f"{n} x{c}" for n, c in top[:MAX_HELPER_NAMES]]
+            node.helpers = [_proc_node(p, all_stale, snap_age) for p in folded[:MAX_CHILDREN]]
+            node.helpers_hidden = max(0, len(folded) - MAX_CHILDREN)
 
     groups: dict[str, Group] = {}
     for p in sorted(orphans, key=lambda p: p.pid):
@@ -521,6 +591,7 @@ def read_views(
     current_session_id: str | None = None,
     stale_after_s: float = 15.0,
     dead_after_s: float = 60.0,
+    helpers: HelperPolicy | None = None,
 ) -> Views:
     """The only function here that touches the filesystem."""
     return build_views(
@@ -529,4 +600,5 @@ def read_views(
         current_session_id=current_session_id,
         stale_after_s=stale_after_s,
         dead_after_s=dead_after_s,
+        helpers=helpers,
     )

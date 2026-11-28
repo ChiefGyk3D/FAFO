@@ -23,7 +23,7 @@ from .config import Config, SourceCfg
 from .model import SNAPSHOT_VERSION, Snapshot, SourceHealth, Status
 from .redact import mask_credentials, sanitize_text
 from .render.export import write_views
-from .render.view import build_views
+from .render.view import build_views, policy_from_config
 from .source import Ctx, Source, SourceResult
 from .store import write_snapshot
 
@@ -311,7 +311,8 @@ class Collector:
         """Write views.json from the snapshot just written. Never raises; logs no values."""
         try:
             now = self._clock()
-            write_views(self._views_path, build_views(snap, now), snapshot=snap, generated=now)
+            views = build_views(snap, now, helpers=policy_from_config(self._cfg))
+            write_views(self._views_path, views, snapshot=snap, generated=now)
         except Exception as exc:  # noqa: BLE001 - views are optional, the snapshot is not
             self.views_write_failures += 1
             n = self.views_write_failures
