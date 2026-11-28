@@ -104,6 +104,7 @@ def hook_python() -> str:
 
 def run_hook_in_process(base: Path, monkeypatch, *, euid: int | None = None) -> None:
     import io
+    import runpy
     import sys
 
     stdin = type("In", (), {"buffer": io.BytesIO(json.dumps({"session_id": SID}).encode())})()
@@ -111,7 +112,9 @@ def run_hook_in_process(base: Path, monkeypatch, *, euid: int | None = None) -> 
     monkeypatch.setattr(sys, "argv", ["hook", str(base)])
     if euid is not None:
         monkeypatch.setattr(os, "geteuid", lambda: euid)
-    exec(compile(hook_python(), "hook", "exec"), {"__name__": "hook"})
+    script = base.parent / "hook_under_test.py"
+    script.write_text(hook_python(), encoding="utf-8")
+    runpy.run_path(str(script), run_name="hook")
 
 
 def private(path: Path, mode: int = 0o700) -> Path:
