@@ -105,6 +105,30 @@ class Runner:
 
 
 @dataclass
+class JobRow:
+    """One Codex plugin job. title is empty unless the source option show_titles is set."""
+
+    state: str  # running | done | failed
+    age: float  # seconds since start (running) or finish (done, failed)
+    kind: str
+    phase: str
+    title: str
+
+
+@dataclass
+class JobSummary:
+    """Counts are always set; rows are bounded and hold titles only when the option allows."""
+
+    running: int = 0
+    done: int = 0
+    failed: int = 0
+    hidden: int = 0  # classified rows past the row cap
+    invalid: int = 0  # files refused as unsafe or malformed
+    unread: int = 0  # directory entries not examined (past the caps)
+    rows: list[JobRow] = field(default_factory=list)
+
+
+@dataclass
 class SourceHealth:
     name: str
     status: Status
@@ -123,6 +147,7 @@ class Snapshot:
     runners: list[Runner] = field(default_factory=list)
     quota: dict = field(default_factory=dict)
     health: list[SourceHealth] = field(default_factory=list)
+    jobs: JobSummary | None = None  # Codex plugin jobs; left out of the file when None
 
     @property
     def llm(self) -> LlmServer | None:

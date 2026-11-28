@@ -14,7 +14,7 @@ from . import activity
 from .redact import ARGS_MODES, _secret_name
 from .repospec import valid_repo
 
-SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
+SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners", "codex_jobs")
 # Sources that need no options are on by default; the rest need a table in the file.
 DEFAULT_ENABLED = ("host", "claude", "codex", "gemini")
 DEFAULT_INTERVAL_S = 2.0
@@ -47,6 +47,7 @@ OPTION_KEYS: dict[str, frozenset[str]] = {
     "ollama": frozenset({"url", "admission_log", "servers"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
+    "codex_jobs": frozenset({"jobs_dir", "window_minutes", "show_titles"}),
 }
 HOST_KEYS = frozenset({"name", "ssh", "key_path", "repos"})
 MAX_PATH_LEN = 4096
@@ -273,7 +274,15 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
         if k in SOURCE_KEYS:
             continue
         n = f"{p}.{k}"
-        if k in ("sessions_dir", "admission_log"):
+        if k == "window_minutes":
+            if type(v) is not int or not 1 <= v <= 1440:
+                raise _bad(n, "must be a whole number of minutes from 1 to 1440")
+            out[k] = v
+        elif k == "show_titles":
+            if type(v) is not bool:
+                raise _bad(n, "must be true or false")
+            out[k] = v
+        elif k in ("sessions_dir", "admission_log", "jobs_dir"):
             out[k] = _opt_path(v, n)
         elif k == "task_labels":
             if v not in TASK_LABEL_MODES:

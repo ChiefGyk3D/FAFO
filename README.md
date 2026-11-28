@@ -182,7 +182,7 @@ behavior tests run locally with `claude plugin test mods/claude-fafo`.
 ### Configuration
 
 FAFO needs no config file. Without one, four local sources are enabled: `host`, `claude`,
-`codex` and `gemini`. `ollama`, `runners` and `copilot` are off until configured. To change
+`codex` and `gemini`. `ollama`, `runners`, `copilot` and `codex_jobs` are off until configured. To change
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
@@ -198,6 +198,26 @@ that is not boring runs below it. Set `collapse_helpers = false` to turn this of
 In the terminal UI, Enter or `x` on the summary row lists up to 256 of that session's helpers, followed by a
 row counting any not shown, and toggles it back; the session screen always lists every process. The pane reads `collapsed` and
 `collapsed_names` from `views.json` (additive fields, schema unchanged).
+
+Codex plugin jobs (`[sources.codex_jobs]`): shows running jobs and jobs finished within
+`window_minutes` (default 60, 1 to 1440) as a short JOBS section in the table, with running,
+done and failed counts. `jobs_dir` is required: the folder holding the plugin's
+`<id>/jobs/*.json` folders (one level) or the job files directly. A running job counts only while
+its `pid` is alive. Job files are untrusted: each is opened without following links and must be a
+regular file you own, not group or world writable, at most 64 KB, with a known `status`;
+anything else is counted as unreadable and never shown. At most 512 directory entries are
+examined and 64 rows kept; the rest are counted. A `*.json` entry whose status cannot be read
+is counted as unreadable, and each folder the budget does not reach counts as not examined.
+Job titles can contain your prompt text, so they are hidden unless `show_titles = true`; titles
+are never logged. The snapshot gains an optional `jobs` key, present only when this source ran,
+so snapshots without it are unchanged.
+
+Shown titles are free text and masking is best effort. It covers token shapes, `key=value` and
+flag-value forms (`--token value`, including values split by tabs, newlines or other control
+characters) and keyword phrases. It does not cover a bare secret word followed by a plain value
+(`api_key hunter2`), nor a secret flag split by a terminal escape sequence. Enable `show_titles`
+only if you accept that titles may appear on screen and in snapshots. Titles are cut to 60
+characters after masking.
 
 ### Task labels
 

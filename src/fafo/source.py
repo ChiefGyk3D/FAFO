@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from .config import SourceCfg
-from .model import LlmServer, Proc, Runner, Session, Status
+from .model import JobSummary, LlmServer, Proc, Runner, Session, Status
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class SourceResult:
     llm: LlmServer | None = None  # older single-server form; llms wins when both are set
     host: dict = field(default_factory=dict)
     quota: dict = field(default_factory=dict)
+    jobs: JobSummary | None = None
     status: Status | None = None
 
 

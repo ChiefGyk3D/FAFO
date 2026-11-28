@@ -309,6 +309,8 @@ class Collector:
             snap.llms.extend(res.llms or ([res.llm] if res.llm is not None else []))
             snap.host.update(res.host)
             snap.quota.update(res.quota)
+            if res.jobs is not None:
+                snap.jobs = res.jobs
         del snap.llms[MAX_LLM_SERVERS:]
         return snap
 

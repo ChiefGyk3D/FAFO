@@ -25,6 +25,7 @@ from .redact import sanitize_text
 from .source import Source
 from .sources.claude import ClaudeSource
 from .sources.codex import CodexSource
+from .sources.codex_jobs import CodexJobsSource
 from .sources.copilot import CopilotSource
 from .sources.gemini import GeminiSource
 from .sources.host import HostSource
@@ -87,6 +88,15 @@ def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
         args_mode=cfg.args_mode,
         value_flags=cfg.show_value_args,
         here_dir=cfg.snapshot_path.parent / "codex-here",
+    )
+
+
+def _codex_jobs(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
+    d = _need("codex_jobs", "jobs_dir", scfg)
+    return CodexJobsSource(
+        str(_path(d)),
+        window_minutes=scfg.options.get("window_minutes", 60),
+        show_titles=scfg.options.get("show_titles", False),
     )
 
 
@@ -161,6 +171,7 @@ SOURCE_FACTORIES: dict[str, Factory] = {
     "host": _host,
     "claude": _claude,
     "codex": _codex,
+    "codex_jobs": _codex_jobs,
     "gemini": _gemini,
     "copilot": _copilot,
     "ollama": _ollama,

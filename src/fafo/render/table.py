@@ -238,6 +238,22 @@ def format_table(views: Views, width: int = 100) -> str:
             items.append(f"  +{views.runners_hidden} more runners")
         lines += _grid(_R_HEAD, items, _R_PRIO, {"JOB", "REPO", "WORKFLOW"}, width)
 
+    if views.jobs is not None:
+        j = views.jobs
+        lines.append("")
+        lines.append("JOBS")
+        lines.append(f"  {j.running} running, {j.done} done recently, {j.failed} failed recently")
+        for r in j.rows:
+            label = " ".join(x for x in (r.kind, r.phase) if x)
+            parts = [f"{r.state:<7}", r.age.rjust(4), label]
+            if r.title:
+                parts.append(r.title)
+            lines.append("  " + "  ".join(p for p in parts if p).rstrip())
+        if j.hidden:
+            lines.append(f"  +{j.hidden} more jobs")
+        if j.invalid or j.unread:
+            lines.append(f"  {j.invalid} unreadable job files, {j.unread} not examined")
+
     if views.quota:
         lines.append("")
         lines.append("QUOTA")
@@ -266,6 +282,8 @@ def _snapshot_doc(snap: Snapshot) -> dict:
     for copy, server in zip(doc["llms"], snap.llms):
         copy["gpu"] = finite_copy(server.gpu)
     doc["llm"] = doc["llms"][0] if doc["llms"] else None  # first server, for older readers
+    if doc.get("jobs") is None:
+        doc.pop("jobs", None)  # additive key: absent unless a jobs source ran
     return doc
 
 

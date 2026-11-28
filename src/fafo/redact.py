@@ -379,21 +379,99 @@ def mask_credentials(text: str) -> str:
     For sources that hand over a finished command line: the argv is gone, so this is
     defense in depth, not allowlist redaction. Input is capped at 4 * MAX_REDACTED_LEN
     characters and every word is checked by the same bounded patterns as redact_argv.
+    Text past the cap is ignored. A word that the cap cuts may continue past it, so that
+    word is masked whole, never kept as a fragment. The cut is taken on the raw text, so
+    controls before it can leave a short piece; that piece is the cut word and is masked.
     """
     if not isinstance(text, str):
         return ""
-    words = _strip(text[: MAX_REDACTED_LEN * 4]).split()
+    head = text[: MAX_REDACTED_LEN * 4]
+    return _mask_readings(head, cut=len(text) > len(head))
+
+
+def _mask_readings(text: str, cut: bool) -> str:
+    """Mask both readings of `text` and keep the one that redacts more (ties keep the split one).
+
+    Split: controls and separators are word breaks. Glued: controls and format characters are
+    removed with no break, so a split token is one word again. Neither reading is trusted
+    alone: an invisible character can split a token (the split reading hides it) or glue a flag
+    to its value (the glued reading hides it), and the reader sees one of them.
+    """
+    stripped = _without_escapes(text)
+    split = _mask_words(_reading(stripped, glued=False).split(), cut)
+    glued = _mask_words(_reading(stripped, glued=True).split(), cut)
+    return glued if glued.count(MASK) > split.count(MASK) else split
+
+
+def _mask_words(words: list[str], cut: bool) -> str:
+    cut_word = len(words) - 1 if cut and words else -1
     out: list[str] = []
     mask_next = False
-    for raw in words[: MAX_TOKENS * 16]:
+    key_before = False  # the previous word names a secret ("password"); a separator may follow
+    prev = ""
+    for index, raw in enumerate(words[: MAX_TOKENS * 16]):
         word = _normalize(raw)
         is_flag = word.startswith("-")
-        if (mask_next and not is_flag) or len(word) > MAX_TOKEN_LEN or _is_credential(word):
+        is_sep = word in ("=", ":")
+        key = word.rstrip("=:")
+        # After a secret key, a value that starts with a separator or a dash is a value, and so is
+        # a value joined to its key by a separator with any spacing ("password =x" as one pair).
+        after_key_value = key_before and word[:1] in ("=", ":", "-") and word not in ("=", ":")
+        pair_kv = bool(prev) and _CREDENTIAL_VALUE.search(f"{prev} {word}") is not None
+        if (
+            index == cut_word
+            or (mask_next and not is_flag)
+            or after_key_value
+            or pair_kv
+            or len(word) > MAX_TOKEN_LEN
+            or _is_credential(word)
+        ):
             out.append(MASK)
         else:
             out.append(word)
-        # The word after a secret-named flag ("--token x", "-p x") or a header scheme is a value.
-        mask_next = word.lower().rstrip(":") in ("bearer", "basic", "authorization") or (
-            is_flag and "=" not in word and _secret_name(word.lstrip("-"))
+        # The word after a secret-named flag ("--token x", "-p x"), a header scheme, a secret
+        # key with its separator ("token=", "password:") or a separator after a secret key
+        # ("password = x", split by whitespace or controls) is a value.
+        mask_next = (
+            word.lower().rstrip(":") in ("bearer", "basic", "authorization")
+            or (is_flag and "=" not in word and _secret_name(word.lstrip("-")))
+            or (key != word and key != "" and _secret_name(key))
+            or (is_sep and key_before)
         )
+        key_before = not is_flag and not is_sep and key == word and _secret_name(word)
+        prev = word
     return " ".join(out)
+
+
+def _without_escapes(text: str) -> str:
+    """Remove terminal escape sequences, which a terminal hides."""
+    s = _ESC_STRING.sub("", text)
+    s = _CSI.sub("", s)
+    return _ESC_OTHER.sub("", s)
+
+
+def _reading(s: str, glued: bool) -> str:
+    """One reading of already escape-free text. Real whitespace and separators (Zs, Zl, Zp)
+    are word breaks in both readings. Controls, format and surrogate characters are breaks in
+    the split reading and removed with no break in the glued reading."""
+    out: list[str] = []
+    for ch in s:
+        cat = unicodedata.category(ch)
+        if ch.isspace() or cat in ("Zs", "Zl", "Zp"):
+            out.append(" ")
+        elif cat in ("Cc", "Cf", "Cs"):
+            if not glued:
+                out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def masked_text(text: str, cap: int, bound: int = 64 * 1024) -> str:
+    """Mask credentials, then cut to `cap`, over both readings of the input up to `bound`.
+
+    The bound is the size of a job file. Input past it is ignored, and a word that the bound cuts
+    is masked whole (see mask_credentials). Callers that display text cut by `cap` should use this,
+    not sanitize_text after mask_credentials on a pre-cut string: the cut would come first.
+    """
+    return sanitize_text(_mask_readings(text[:bound], cut=len(text) > bound), cap)
