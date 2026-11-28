@@ -34,6 +34,8 @@ MAX_HOPS = 64
 MIN_WIDTH, MAX_WIDTH = 20, 300
 DEFAULT_MIN_WIDTH = 40
 FALLBACK_COLUMNS = 100
+LINE_MIN_WIDTH, LINE_MAX_WIDTH, LINE_DEFAULT_WIDTH = 3, 300, 80
+LINE_STALE_AFTER = 30.0
 REFRESH_MIN, REFRESH_MAX = 0.25, 30.0
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 TUI_HINT = "fafo: the tui needs Textual: pip install textual (or reinstall fafo with its dependencies)"
@@ -90,6 +92,25 @@ def refresh_arg(text: str) -> float:
     if not math.isfinite(v) or not REFRESH_MIN <= v <= REFRESH_MAX:
         raise argparse.ArgumentTypeError(f"refresh must be between {REFRESH_MIN} and {REFRESH_MAX}")
     return v
+
+
+def line_width_arg(text: str) -> int:
+    """`fafo line` never fails on its options: a bad width falls back, an extreme one is clamped."""
+    try:
+        n = int(text)
+    except ValueError:
+        return LINE_DEFAULT_WIDTH
+    return max(LINE_MIN_WIDTH, min(LINE_MAX_WIDTH, n))
+
+
+def stale_after_arg(text: str) -> float:
+    try:
+        v = float(text)
+    except ValueError:
+        return LINE_STALE_AFTER
+    if not math.isfinite(v):
+        return LINE_STALE_AFTER
+    return max(1.0, min(86400.0, v))
 
 
 def default_width() -> int:
@@ -182,6 +203,25 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_line(args: argparse.Namespace) -> int:
+    """One line for a status bar. Always exit 0, never a traceback: a status line must not break
+    the host UI. Any failure prints the no-collector marker (or nothing with --quiet)."""
+    from . import line as linemod
+
+    try:
+        text = linemod.render_line(
+            read_snapshot(_snapshot_path(args)), _now(), width=args.width, color=args.color,
+            stale_after=args.stale_after, quiet=args.quiet,
+        )
+    except Exception:  # noqa: BLE001 - a status line never fails: marker, not a traceback
+        text = "" if args.quiet else linemod.NO_COLLECTOR_MARK[: args.width]
+    try:
+        _emit(text + "\n")
+    except OSError:  # closed pipe: the reader went away
+        pass
+    return EXIT_OK
+
+
 def _cmd_tui(args: argparse.Namespace) -> int:
     path = _snapshot_path(args)
     try:
@@ -224,6 +264,23 @@ def add_render_commands(subparsers: Any) -> None:
     )
     _common(s)
     s.set_defaults(handler=_cmd_sessions)
+
+    ln = subparsers.add_parser(
+        "line", help="one short status-line summary (empty when idle); always exits 0"
+    )
+    _common(ln, session=False)
+    ln.add_argument(
+        "--width", type=line_width_arg, default=LINE_DEFAULT_WIDTH, metavar="N",
+        help=f"maximum visible width, clamped to {LINE_MIN_WIDTH} to {LINE_MAX_WIDTH} "
+        f"(default {LINE_DEFAULT_WIDTH}); whole segments only, a cut ends in ...",
+    )
+    ln.add_argument("--color", action="store_true", help="dim stale and red down sources (default off)")
+    ln.add_argument("--quiet", action="store_true", help="print nothing instead of the no-collector marker")
+    ln.add_argument(
+        "--stale-after", type=stale_after_arg, default=LINE_STALE_AFTER, metavar="SECONDS",
+        help=f"snapshot older than this counts as no collector (default {LINE_STALE_AFTER:g})",
+    )
+    ln.set_defaults(handler=_cmd_line)
 
     u = subparsers.add_parser("tui", help="full-screen view (needs Textual)")
     _common(u)
