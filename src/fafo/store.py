@@ -112,6 +112,9 @@ def write_snapshot(
         raise
 
 
+_MAX_NAME = 100  # longest identity name kept (LLM server and health row names)
+
+
 def _int(v):
     if type(v) is not int or v < 0 or v.bit_length() > MAX_INT_BITS:
         raise TypeError("expected non-negative int")
@@ -156,6 +159,11 @@ def _project_source(v):
         raise TypeError("bad project_source")
 
 
+def _health_name(v):
+    if type(v) is not str or len(v) > _MAX_NAME:
+        raise TypeError("bad health name")
+
+
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
 _SPEC = {
     Stamped: {"value": _str, "as_of": _float},
@@ -170,7 +178,7 @@ _SPEC = {
         "step": _str, "step_n": _int, "step_total": _int, "elapsed": _float,
         "load": _float, "mem": _float, "disk": _float,
     },
-    SourceHealth: {"name": _str, "status": _status, "last_ok": _float, "error": _str},
+    SourceHealth: {"name": _health_name, "status": _status, "last_ok": _float, "error": _str},
 }
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
@@ -200,33 +208,41 @@ _IDENTITY = {
     Session: {"pid", "session_id"},
     Runner: {"name"},
     LlmServer: {"name"},
+    SourceHealth: {"name"},
 }
 
 
 def _check(cls, data, spec, tally):
     """Require a dict with exactly the dataclass fields. Valid scalars pass through; a bad typed
-    number becomes its default (counted); a bad identity field raises _Drop; any other bad value
-    refuses the file (TypeError). Returns a repaired copy."""
+    number becomes its default (counted); any other bad value refuses the file (TypeError). A bad
+    identity field is only FLAGGED: the whole row (and its nested containers) must still validate,
+    so structural damage anywhere in a row refuses the file even when its identity is bad.
+    Returns (repaired copy, identity_bad); the caller drops the row after the full validation."""
     if type(data) is not dict:
         raise TypeError("expected object")
     if set(data) != {f.name for f in fields(cls)}:
         raise TypeError("field mismatch")
     out = dict(data)
+    identity_bad = False
     for name, check in spec.items():
         try:
             check(out[name])
         except TypeError:
             if name in _IDENTITY.get(cls, ()):
-                raise _Drop from None
+                identity_bad = True
+                continue
             if check not in _DEFAULTS:
                 raise
             out[name] = _DEFAULTS[check]
             tally.fixed += 1
-    return out
+    return out, identity_bad
 
 
 def _build(cls, data, tally):
-    return cls(**_check(cls, data, _SPEC[cls], tally))
+    out, identity_bad = _check(cls, data, _SPEC[cls], tally)
+    if identity_bad:
+        raise _Drop
+    return cls(**out)
 
 
 def _rows(build, data, tally):
@@ -252,8 +268,11 @@ def _session(data, tally) -> Session:
     if type(data) is not dict:
         raise TypeError("bad session")
     data = {**_SESSION_OPTIONAL, **data}
-    out = _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None}, tally)
-    return Session(**{**out, "project": _build(Stamped, out["project"], tally)})
+    out, identity_bad = _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None}, tally)
+    project = _build(Stamped, out["project"], tally)  # validated before any drop
+    if identity_bad:
+        raise _Drop
+    return Session(**{**out, "project": project})
 
 
 def _session_list(data, tally) -> list[Session]:
@@ -280,12 +299,12 @@ def _llm(data, tally, *, old: bool = False) -> LlmServer | None:
         return None
     if old and type(data) is dict:
         data = {**_LLM_NEW, **data}
-    out = _check(
+    out, identity_bad = _check(
         LlmServer, data,
         {"queue": _int, "gpu": _dict, "name": _name, "last_ok": _float, "reachable": _bool},
         tally,
     )
-    return LlmServer(
+    server = LlmServer(  # nested rows are validated here, before any drop decision
         models=_list(LoadedModel, out["models"], tally),
         queue=out["queue"],
         inflight=_list(Inflight, out["inflight"], tally),
@@ -294,6 +313,9 @@ def _llm(data, tally, *, old: bool = False) -> LlmServer | None:
         last_ok=out["last_ok"],
         reachable=out["reachable"],
     )
+    if identity_bad:
+        raise _Drop
+    return server
 
 
 def _llms(doc, old: bool, tally) -> list[LlmServer]:
@@ -378,4 +400,9 @@ def read_snapshot(path: Path) -> Snapshot | None:
         ArithmeticError, RecursionError,
     ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
         _log.debug("snapshot unreadable: %s", type(exc).__name__)
+        return None
+    except MemoryError:
+        raise
+    except Exception as exc:  # any other surprise in a row validator: refuse, never raise
+        _log.warning("snapshot unreadable: unexpected %s", type(exc).__name__)  # class only
         return None

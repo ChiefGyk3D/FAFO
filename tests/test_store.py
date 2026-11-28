@@ -969,3 +969,80 @@ def test_two_servers_bad_second_name_drops_it_and_bad_last_ok_repairs(tmp_path: 
     path.write_text(json.dumps(doc))
     snap = read_snapshot(path)
     assert snap is not None and [s.last_ok for s in snap.llms] == [990.0, 0.0]
+
+
+# ---- round 2: identity is decided only after the whole row validated ---------------------------
+
+def test_bad_identity_alone_drops_only_that_row(tmp_path: Path):
+    doc = _good_doc(tmp_path)
+    second = {**doc["procs"][0], "pid": 99}
+    doc["procs"] = [{**doc["procs"][0], "pid": None}, second]
+    snap = read_snapshot(_write_doc(tmp_path, doc))
+    assert snap is not None and [p.pid for p in snap.procs] == [99]
+
+
+def test_bad_pid_with_structural_damage_in_the_same_row_refuses_the_file(tmp_path: Path):
+    for damage in ({"cmd": None}, {"agent": 5}):
+        doc = _good_doc(tmp_path)
+        doc["procs"][0].update(pid=None, **damage)
+        assert read_snapshot(_write_doc(tmp_path, doc)) is None, damage
+    doc = _good_doc(tmp_path)
+    doc["sessions"][0].update(pid="x", agent=None)
+    assert read_snapshot(_write_doc(tmp_path, doc)) is None
+    doc = _good_doc(tmp_path)
+    doc["sessions"][0].update(session_id=None, project="not-a-dict")
+    assert read_snapshot(_write_doc(tmp_path, doc)) is None
+
+
+def test_bad_server_name_with_structural_damage_in_the_same_row_refuses_the_file(tmp_path: Path):
+    for damage in ({"models": {}}, {"inflight": "x"}, {"gpu": []}, {"models": [{"name": 1}]}):
+        doc = _good_doc(tmp_path)
+        doc["llms"][0].update(name=7, **damage)
+        assert read_snapshot(_write_doc(tmp_path, doc)) is None, damage
+
+
+def test_missing_name_key_is_structural_and_a_non_string_name_is_a_row_drop(tmp_path: Path):
+    # A missing "name" key is a key-set mismatch: structural, the file is refused (same case as
+    # the pop("name") entry in test_bad_llms_rejected). A present but non-string name is a bad
+    # identity VALUE: only that server is dropped.
+    path = tmp_path / "snap.json"
+    write_snapshot(path, two_servers())
+    doc = json.loads(path.read_bytes())
+    del doc["llms"][1]["name"]
+    path.write_text(json.dumps(doc))
+    assert read_snapshot(path) is None
+    doc["llms"][1]["name"] = 7
+    path.write_text(json.dumps(doc))
+    snap = read_snapshot(path)
+    assert snap is not None and [s.name for s in snap.llms] == ["alpha"]
+
+
+@pytest.mark.parametrize("bad", [None, 7, "x" * 500, ["a"], True])
+def test_bad_health_name_drops_only_that_health_row(tmp_path: Path, bad):
+    doc = _good_doc(tmp_path)
+    doc["health"] = [{**doc["health"][0], "name": bad}, {**doc["health"][0], "name": "ok"}]
+    snap = read_snapshot(_write_doc(tmp_path, doc))
+    assert snap is not None, bad
+    assert [h.name for h in snap.health] == ["ok"]
+    assert len(snap.sessions) == 1 and len(snap.procs) == 1
+
+
+def test_bad_health_name_with_structural_damage_refuses(tmp_path: Path):
+    doc = _good_doc(tmp_path)
+    doc["health"][0].update(name=None, status="broken")
+    assert read_snapshot(_write_doc(tmp_path, doc)) is None
+
+
+def test_unexpected_exception_in_the_row_validator_returns_none_and_logs_class_only(
+    tmp_path: Path, monkeypatch, caplog
+):
+    import fafo.store as store
+
+    def boom(v):
+        raise RuntimeError("SECRET-detail")
+
+    path, _ = _doc(tmp_path)
+    monkeypatch.setitem(store._SPEC[Proc], "cmd", boom)
+    with caplog.at_level("DEBUG", logger="fafo.store"):
+        assert read_snapshot(path) is None  # must not raise
+    assert "RuntimeError" in caplog.text and "SECRET" not in caplog.text
