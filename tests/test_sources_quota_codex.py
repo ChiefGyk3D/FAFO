@@ -19,8 +19,8 @@ from fafo.sources import quota_codex
 from fafo.sources.quota_codex import CodexQuotaSource
 
 NOW = 1_800_000_000.0
-# A token-shaped secret that must never reach any output.
-SECRET = "sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+# A credential-shaped canary that must never reach any output.
+CANARY = "tok" + "-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
 
 def ctx(now=NOW):
@@ -292,30 +292,30 @@ def _fake(st, mode=None, uid=None):
 
 
 def test_no_value_appears_in_logs(tmp_path, caplog):
-    make(tmp_path, [text_line(SECRET), rec(iso(NOW - 1), p=(300, 61.3125, NOW + 4321), s=None)])
+    make(tmp_path, [text_line(CANARY), rec(iso(NOW - 1), p=(300, 61.3125, NOW + 4321), s=None)])
     with caplog.at_level(logging.DEBUG):
         run(tmp_path)
         run(tmp_path / "missing")
-        make(tmp_path / "b", [text_line(SECRET), "garbage " + SECRET])
+        make(tmp_path / "b", [text_line(CANARY), "garbage " + CANARY])
         run(tmp_path / "b")
     text = caplog.text
-    for needle in (SECRET, "61.3125", "4321", str(tmp_path)):
+    for needle in (CANARY, "61.3125", "4321", str(tmp_path)):
         assert needle not in text
 
 
-def test_secret_in_transcript_never_reaches_any_output(tmp_path, caplog):
+def test_canary_in_transcript_never_reaches_any_output(tmp_path, caplog):
     lines = [
-        text_line(SECRET),
+        text_line(CANARY),
         rec(iso(NOW - 2)),
         json.dumps({"timestamp": iso(NOW), "payload": {"rate_limits": {"primary": {
             "window_minutes": 300, "used_percent": 12, "resets_at": int(NOW + 99),
-            "note": SECRET}, "plan_type": SECRET}}}),
+            "note": CANARY}, "plan_type": CANARY}}}),
     ]
     make(tmp_path, lines)
     with caplog.at_level(logging.DEBUG):
         res = run(tmp_path)
     dump = json.dumps(res.quota) + repr(res) + caplog.text
-    assert SECRET not in dump
+    assert CANARY not in dump
     assert set(res.quota["codex"]) <= {"5h", "wk", "5h_resets_in_s", "wk_resets_in_s", "as_of", "stale"}
     assert all(type(v) in (int, float) for v in res.quota["codex"].values())
 
