@@ -77,6 +77,11 @@ def _omit_default_source(plain) -> None:
                 del s["project_source"]
 
 
+# Largest snapshot file the reader accepts: twice the 2 MiB export cap, since a snapshot carries
+# every source's rows before the export trims them. Anything bigger is refused unread.
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+
+
 def write_snapshot(
     path: Path, snap: Snapshot, *, _before_replace: Callable[[], None] | None = None
 ) -> None:
@@ -93,7 +98,9 @@ def write_snapshot(
         _log.warning("snapshot: sanitized %d values (nulled, dropped or truncated)", replaced)
     _omit_default_source(plain)
     plain["llm"] = plain["llms"][0] if plain["llms"] else None  # first server, for older readers
-    payload = json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    payload = _encode(plain)
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        payload = _trim_to_fit(plain)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -110,6 +117,42 @@ def write_snapshot(
         except FileNotFoundError:
             pass
         raise
+
+
+def _encode(plain: dict) -> bytes:
+    return json.dumps(plain, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _trim_to_fit(plain: dict) -> bytes:
+    """Shrink an over-cap document to MAX_SNAPSHOT_BYTES, never raising.
+
+    The reader refuses a file over the cap, so the writer must not produce one. Rows are dropped
+    from the tail, in this order: processes attached to no session, then processes of sessions
+    (last sessions first), then runner rows. Sessions and health are never dropped. The smallest
+    number of dropped rows that fits is found by bisection (at most about 20 encodes).
+    """
+    procs = plain["procs"]
+    order = [i for i in range(len(procs) - 1, -1, -1) if procs[i].get("session_pid") is None]
+    order += [i for i in range(len(procs) - 1, -1, -1) if procs[i].get("session_pid") is not None]
+    runners = plain["runners"]
+    total = len(order) + len(runners)
+
+    def build(k: int) -> bytes:
+        gone = set(order[: min(k, len(order))])
+        doc = dict(plain)
+        doc["procs"] = [r for i, r in enumerate(procs) if i not in gone]
+        doc["runners"] = runners[: max(0, len(runners) - max(0, k - len(order)))]
+        return _encode(doc)
+
+    lo, hi = 0, total  # invariant: hi fits, or hi is the smallest document we can make
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if len(build(mid)) <= MAX_SNAPSHOT_BYTES:
+            hi = mid
+        else:
+            lo = mid + 1
+    _log.warning("snapshot: trimmed %d rows to fit", hi)
+    return build(hi)
 
 
 _MAX_NAME = 100  # longest identity name kept (LLM server and health row names)
@@ -383,9 +426,6 @@ def _snapshot(doc, tally) -> Snapshot:
     )
 
 
-# Largest snapshot file the reader accepts: twice the 2 MiB export cap, since a snapshot carries
-# every source's rows before the export trims them. Anything bigger is refused unread.
-MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 
 

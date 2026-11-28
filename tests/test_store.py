@@ -1157,3 +1157,55 @@ def test_unexpected_exception_in_the_row_validator_returns_none_and_logs_class_o
     with caplog.at_level("DEBUG", logger="fafo.store"):
         assert read_snapshot(path) is None  # must not raise
     assert "RuntimeError" in caplog.text and "SECRET" not in caplog.text
+
+
+# ---- the writer never produces a file the reader refuses ----
+
+def _big_snapshot(n: int, cmd_len: int = 1000) -> Snapshot:
+    snap = make_snapshot()
+    snap.procs = [
+        Proc(10_000 + i, 1, (42 if i % 2 else None), "claude", "c" * cmd_len, 0.1, 1, 1.0)
+        for i in range(n)
+    ]
+    return snap
+
+
+def test_oversized_snapshot_is_trimmed_to_fit_and_still_reads(tmp_path, caplog):
+    p = tmp_path / "snap.json"
+    snap = _big_snapshot(6000)
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(p, snap)
+    assert p.stat().st_size <= store.MAX_SNAPSHOT_BYTES
+    got = read_snapshot(p)
+    assert got is not None
+    assert got.sessions == snap.sessions and got.health == snap.health
+    assert 0 < len(got.procs) < 6000
+    assert "trimmed" in caplog.text and "ccccc" not in caplog.text
+
+
+def test_trim_drops_unattached_procs_first(tmp_path):
+    p = tmp_path / "snap.json"
+    write_snapshot(p, _big_snapshot(6000))  # 3000 attached, 3000 unattached
+    got = read_snapshot(p)
+    attached = [x for x in got.procs if x.session_pid is not None]
+    unattached = [x for x in got.procs if x.session_pid is None]
+    assert attached  # attached rows survive while any unattached row is dropped
+    assert len(unattached) < 3000
+    assert not unattached or len(attached) == 3000
+
+
+def test_minimal_snapshot_is_untouched(tmp_path, caplog):
+    p = tmp_path / "snap.json"
+    snap = make_snapshot()
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(p, snap)
+    assert read_snapshot(p) == snap
+    assert "trimmed" not in caplog.text
+
+
+def test_written_file_never_exceeds_the_cap(tmp_path):
+    for n in (0, 100, 4000, 9000):
+        p = tmp_path / f"s{n}.json"
+        write_snapshot(p, _big_snapshot(n))
+        assert p.stat().st_size <= store.MAX_SNAPSHOT_BYTES
+        assert read_snapshot(p) is not None
