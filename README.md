@@ -61,8 +61,37 @@ python3 -m venv ~/.local/share/fafo-venv
 
 `fafo table`, `fafo sessions` and `fafo tui` take `--session ID` to mark one session id as
 yours. `--session auto` finds it by process ancestry: the nearest parent process that is a
-Claude session in the snapshot. It only works when the command runs from a terminal inside
-that Claude session. With no match, nothing is marked.
+Claude or Codex session in the snapshot. It only works when the command runs from a terminal
+inside that session's process tree. With no match, nothing is marked.
+
+### Using FAFO with Codex
+
+Codex has no pane API, so run `fafo tui` in a tmux pane or a second terminal next to Codex.
+Without anything else, Codex processes show as plain rows. To get a Codex session row with its
+session id as the address, and `you are here`, install a SessionStart hook:
+
+1. Copy `examples/codex/fafo-session-hook.sh` somewhere you own and make it executable.
+2. Register it as a Codex `SessionStart` command hook. FORMAT TO CONFIRM against the current
+   Codex docs (hooks and config reference): the configuration file name and syntax were not
+   verifiable offline when this was written. The hook itself is a plain command that reads JSON
+   on stdin, so it needs only the command path (and, optionally, a state directory argument).
+3. Run `fafo tui --session auto` (or `fafo table --session auto`) from a shell that is a
+   descendant of the Codex process, or `fafo tui --session CODEX_SESSION_ID` from anywhere.
+
+What the hook writes: `<state dir>/codex-here/<codex pid>.json` with exactly `session_id`,
+`ppid` and `started_at`, atomically, mode 0600 in a 0700 directory. The state dir is the
+directory of the FAFO snapshot: `$XDG_RUNTIME_DIR/fafo`, else `~/.local/state/fafo` (the hook
+takes a different directory as its first argument; the collector reads the directory next to
+`snapshot_path`). Privacy: only the session id is recorded. The hook never reads
+`transcript_path` or any other field, prints nothing and always exits 0.
+
+The collector reads those files read-only (at most 256 files of 4 KB, owner-only regular files,
+strict schema, no symlinks) and uses one only while its pid is still a live `codex` process that
+started no later than the file was written, so a reused pid is ignored. The collector never
+deletes files; remove stale ones yourself, for example
+`find ~/.local/state/fafo/codex-here -name '*.json' -mtime +7 -delete`.
+The hook's parent process must be the Codex process itself; if Codex starts hooks through an
+intermediate process, no session row appears (unverified).
 
 ### Claude pane
 

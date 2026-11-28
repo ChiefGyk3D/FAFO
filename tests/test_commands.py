@@ -241,8 +241,8 @@ def test_no_match_gives_none():
     assert commands.find_current_session(SESSIONS, 4000, chain(4000, 4001, 4002)) is None
 
 
-def test_non_claude_and_pidless_sessions_never_match():
-    other = [sess(500, "cod-1", "x", agent="codex"), sess(0, "run-1", "y", agent="copilot")]
+def test_other_agents_and_pidless_sessions_never_match():
+    other = [sess(500, "gem-1", "x", agent="gemini"), sess(0, "run-1", "y", agent="copilot")]
     assert commands.find_current_session(other, 500, chain(500, 0)) is None
 
 
