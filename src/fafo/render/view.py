@@ -13,6 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..activity import clean_activity
 from ..config import DEFAULT_BORING_PROCS as DEFAULT_BORING
 from ..model import DEFAULT_LLM_NAME, MAX_LLM_SERVERS, LlmServer, Proc, Session, Snapshot
 from ..redact import sanitize_text
@@ -133,6 +134,7 @@ class ProcNode:
     rss: str
     stale: bool = False
     age: str = ""
+    activity: str = "unknown"  # active, idle or unknown (CPU time over recent samples)
 
 
 @dataclass(frozen=True)
@@ -184,6 +186,7 @@ class SessionNode:
     helpers: list[ProcNode] = field(default_factory=list)
     helpers_hidden: int = 0
     project_source: str = "live"
+    activity: str = "unknown"
 
 
 @dataclass
@@ -318,6 +321,7 @@ def _proc_node(p: Proc, all_stale: bool, snap_age: str) -> ProcNode:
         rss=size_text(p.rss),
         stale=all_stale,
         age=snap_age if all_stale else "",
+        activity=clean_activity(p.activity),
     )
 
 
@@ -353,6 +357,7 @@ def _session_node(
         rss=size_text(s.rss),
         stale=stale,
         age=(age_text(field_age) if field_age > stale_after_s else snap_age) if stale else "",
+        activity=clean_activity(s.activity),
     )
 
 
