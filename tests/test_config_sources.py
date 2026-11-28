@@ -241,7 +241,7 @@ def uncommented_example() -> str:
         else:
             out.append(line)
     assert not inside
-    assert blocks == 3  # ollama, runners, copilot: something was collected
+    assert blocks == 4  # claude_quota, ollama, runners, copilot: something was collected
     return "\n".join(out) + "\n"
 
 

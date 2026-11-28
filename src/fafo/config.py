@@ -13,7 +13,7 @@ from typing import Any
 from .redact import ARGS_MODES, _secret_name
 from .repospec import valid_repo
 
-SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
+SOURCE_NAMES = ("host", "claude", "claude_quota", "codex", "gemini", "copilot", "ollama", "runners")
 # Sources that need no options are on by default; the rest need a table in the file.
 DEFAULT_ENABLED = ("host", "claude", "codex", "gemini")
 DEFAULT_INTERVAL_S = 2.0
@@ -42,6 +42,7 @@ SECRET_WORDS = ("token", "password", "secret", "key")
 # Source-specific option keys, per source. Anything else is an unknown key.
 OPTION_KEYS: dict[str, frozenset[str]] = {
     "claude": frozenset({"sessions_dir", "task_labels"}),
+    "claude_quota": frozenset({"usage_cache"}),
     "ollama": frozenset({"url", "admission_log", "servers"}),
     "runners": frozenset({"repos", "token_env", "token_file", "hosts"}),
     "copilot": frozenset({"repos", "session_paths", "token_env", "token_file"}),
@@ -271,7 +272,7 @@ def _parse_options(source: str, body: dict) -> dict[str, Any]:
         if k in SOURCE_KEYS:
             continue
         n = f"{p}.{k}"
-        if k in ("sessions_dir", "admission_log"):
+        if k in ("sessions_dir", "admission_log", "usage_cache"):
             out[k] = _opt_path(v, n)
         elif k == "task_labels":
             if v not in TASK_LABEL_MODES:

@@ -153,6 +153,17 @@ FAFO needs no config file. Without one, four local sources are enabled: `host`, 
 anything, copy `config.example.toml` somewhere and pass it with `--config PATH` to `run`,
 `doctor` or any render command; FAFO does not search for a config file on its own.
 
+Claude quota (`[sources.claude_quota]`, off until configured): shows the 5-hour and weekly usage
+windows (used percent, time to reset) in the QUOTA block. It reads `usage_cache`, a JSON file that
+another tool writes; FAFO never writes it and never contacts Claude. The file must be a regular file
+you own with mode 0600 in a directory you own that is not group or other writable, at most 64 KB,
+shaped `{"windows": [{"label": "5h", "used_percent": 41.4, "resets_at": 1800007800, "captured_at":
+1799999940}, {"label": "weekly", ...}]}` (exactly those four keys per window; `resets_at` may be
+null; times are epoch seconds). A percent is clamped to 0..100. A window captured more than 30
+minutes ago is marked `stale` and keeps its original age; it never disappears. A missing file is
+`absent`; an unreadable, oversized, corrupt or wrongly shaped file is reported as a reason class
+only (`unreadable`, `refused`, `too_large`, `corrupt`, `schema`), never with its content or path.
+
 Ollama: one `url`, or up to 8 `[[sources.ollama.servers]]` tables (`name`, `url`), polled on their own so one
 dead server never hides the others; its last rows stay and show their age. Each server's poll (two requests) has one deadline, min(6, `timeout_s` minus 0.5) seconds, always less than `timeout_s` (the Ollama `timeout_s` must be at least 1 second, a lower value is refused; 2.5 s for the `timeout_s = 3` in the example, 4.5 s for the default 5), with the servers polled in parallel; a hung server costs one abandoned daemon thread, never more. See `config.example.toml`.
 
