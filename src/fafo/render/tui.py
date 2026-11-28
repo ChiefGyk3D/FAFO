@@ -303,7 +303,7 @@ def build_sessions_page(
                     for ch in node.helpers:
                         add(Item("child", ("c", sid, ch.pid), ch, node))
                     if node.helpers_hidden:
-                        add(Item("more", ("mh", sid), f"+{node.helpers_hidden} more not shown",
+                        add(Item("more", ("mh", sid), f"+{node.helpers_hidden} more helpers not shown",
                                  node))
     if views.sessions_hidden and not needle:
         add(Item("more", ("m", "sessions"), f"+{views.sessions_hidden} more sessions not shown"))
@@ -350,12 +350,14 @@ def build_procs_page(
         if node.children_hidden:
             add(Item("more", ("m", node.session_id), f"+{node.children_hidden} more not shown"))
         if node.collapsed:
-            if node.session_id in expanded:
+            shown = node.session_id in expanded
+            add(Item("helpers", ("h", node.session_id), _helper_text(node, shown), node))
+            if shown:
                 for ch in node.helpers:
                     add(Item("proc", ("p", ch.pid, node.session_id), ch, _label(node)))
-            else:
-                add(Item("more", ("mc", node.session_id),
-                         helper_summary(node.collapsed, node.collapsed_names)))
+                if node.helpers_hidden:
+                    add(Item("more", ("mh", node.session_id),
+                             f"+{node.helpers_hidden} more helpers not shown", node))
     for g in views.unattached:
         for p in _group_procs(g, needle):
             add(Item("proc", ("p", p.pid, g.name), p, "-"))
@@ -462,9 +464,19 @@ def _find_session(views: Views, sid: str | None) -> SessionNode | None:
     return None
 
 
-def build_drill_page(views: Views, sid: str | None, width: int) -> Page:
+def build_drill_page(
+    views: Views, sid: str | None, width: int, expanded: frozenset | set = frozenset()
+) -> Page:
     node = _find_session(views, sid)
     lines: list[tuple[str, str]] = []
+
+    def proc_lines(rows: list[ProcNode]) -> None:
+        for ch in rows:
+            lines.append((f"  {ch.pid:>8}  {ch.agent:<8}  cpu {ch.cpu:>4}  mem {ch.rss:>5}",
+                          "stale" if ch.stale else "fg"))
+            for chunk in _wrap(ch.cmd, width - 6):
+                lines.append((f"      {chunk}", "idle"))
+
     if node is None:
         lines.append(("no session selected, or it has ended. Esc goes back.", "waiting"))
     else:
@@ -488,15 +500,20 @@ def build_drill_page(views: Views, sid: str | None, width: int) -> Page:
         lines.append(("", "fg"))
         total = len(node.children) + node.children_hidden + node.collapsed
         lines.append((f"children ({total})", "head"))
-        for ch in [*node.children, *node.helpers]:
-            lines.append((f"  {ch.pid:>8}  {ch.agent:<8}  cpu {ch.cpu:>4}  mem {ch.rss:>5}",
-                          "stale" if ch.stale else "fg"))
-            for chunk in _wrap(ch.cmd, width - 6):
-                lines.append((f"      {chunk}", "idle"))
-        if node.children_hidden or node.helpers_hidden:
-            n = node.children_hidden + node.helpers_hidden
-            lines.append((f"  +{n} more not shown", "waiting"))
+        proc_lines(node.children)
+        if node.children_hidden:
+            lines.append((f"  +{node.children_hidden} more not shown", "waiting"))
     items = [Item("line", ("l", i), t, c) for i, (t, c) in enumerate(lines)]
+    if node is not None and node.collapsed:
+        shown = node.session_id in expanded
+        items.append(Item("helpers", ("h", node.session_id), _helper_text(node, shown), node))
+        if shown:
+            lines.clear()
+            proc_lines(node.helpers)
+            if node.helpers_hidden:
+                lines.append((f"  +{node.helpers_hidden} more helpers not shown", "waiting"))
+            n = len(items)
+            items += [Item("line", ("l", n + i), t, c) for i, (t, c) in enumerate(lines)]
     return Page([], items, None, "")
 
 
@@ -768,7 +785,9 @@ class FafoApp(App[int]):
             return build_runners_page(v, needle)
         if i == V_QUOTA:
             return build_quota_page(v, needle)
-        return build_drill_page(v, self.drill_id, max(20, self.size.width - 2))
+        return build_drill_page(
+            v, self.drill_id, max(20, self.size.width - 2), self.state.expanded
+        )
 
     def _rebuild(self) -> None:
         # Building tens of thousands of row tuples would trigger full collections over the
@@ -1121,9 +1140,13 @@ class FafoApp(App[int]):
 
     def action_open(self) -> None:
         def go() -> None:
-            if self.view_idx == V_DRILL or not self.page.items:
+            if not self.page.items:
                 return
             it = self.page.items[self.sel_idx]
+            if self.view_idx == V_DRILL:
+                if it.kind == "helpers":
+                    self._toggle_helpers(it.b.session_id)
+                return
             if it.kind == "head":
                 self._toggle_key(it.key[1], None)
                 return
@@ -1154,11 +1177,13 @@ class FafoApp(App[int]):
 
     def action_helpers(self) -> None:
         def go() -> None:
-            if self.view_idx not in (V_SESSIONS, V_PROCS) or not self.page.items:
+            if self.view_idx not in (V_SESSIONS, V_PROCS, V_DRILL) or not self.page.items:
                 return
             it = self.page.items[self.sel_idx]
             node = None
-            if it.kind == "sess":
+            if self.view_idx == V_DRILL:
+                node = _find_session(self.views, self.drill_id)
+            elif it.kind == "sess":
                 node = it.a
             elif it.kind in ("child", "more", "helpers") and isinstance(it.b, SessionNode):
                 node = it.b

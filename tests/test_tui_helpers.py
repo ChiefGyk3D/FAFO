@@ -121,7 +121,7 @@ def test_expanded_state_is_bounded(tmp_path):
     asyncio.run(go())
 
 
-def test_drill_in_lists_every_process_including_helpers(tmp_path):
+def test_drill_in_has_summary_row_and_expands_with_enter_and_x(tmp_path):
     path = tmp_path / "snapshot.json"
     write_snapshot(path, snapshot())
 
@@ -132,7 +132,83 @@ def test_drill_in_lists_every_process_including_helpers(tmp_path):
             select(app, "sess", SID_A)
             await pilot.press("enter")
             await pilot.pause(0.1)
+            assert app.view_idx == tui.V_DRILL
             text = "\n".join(lines(app))
-            assert "children (4)" in text and text.count("sleep 5") == 3
+            assert "children (4)" in text and "+3 helpers (sleep x3)" in text
+            assert "sleep 5" not in text
+            for key in ("enter", "x"):
+                select(app, "helpers", SID_A)
+                await pilot.press(key)
+                await pilot.pause(0.1)
+                assert "\n".join(lines(app)).count("sleep 5") == 3, key
+                select(app, "helpers", SID_A)
+                await pilot.press(key)
+                await pilot.pause(0.1)
+                assert "sleep 5" not in "\n".join(lines(app)), key
+            assert app.view_idx == tui.V_DRILL and not app.state.expanded
+
+    asyncio.run(go())
+
+
+def test_enter_and_x_toggle_the_summary_row_on_the_process_page(tmp_path):
+    path = tmp_path / "snapshot.json"
+    write_snapshot(path, snapshot())
+
+    async def go():
+        app = FafoApp(path, refresh_s=0.25)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await wait_read(pilot, app)
+            await pilot.press("2")
+            await pilot.pause(0.1)
+            assert app.view_idx == tui.V_PROCS
+            assert "sleep 5" not in "\n".join(lines(app))
+            assert "+3 helpers (sleep x3)" in "\n".join(lines(app))
+            for key in ("enter", "x"):
+                select(app, "helpers", SID_A)
+                await pilot.press(key)
+                await pilot.pause(0.1)
+                text = "\n".join(lines(app))
+                assert app.view_idx == tui.V_PROCS, key  # Enter did not open the drill-in
+                assert text.count("sleep 5") == 3, key  # session A only; B stays collapsed
+                assert SID_A in app.state.expanded and SID_B not in app.state.expanded
+                select(app, "helpers", SID_A)
+                await pilot.press(key)
+                await pilot.pause(0.1)
+                assert "sleep 5" not in "\n".join(lines(app)), key
+                assert not app.state.expanded
+
+    asyncio.run(go())
+
+
+def big_snapshot(n):
+    procs = [proc(5000 + i, 100, "sleep 5") for i in range(n)] + [proc(1200, 100, "pytest -q")]
+    return Snapshot(
+        version=SNAPSHOT_VERSION, taken=time.time(), host={},
+        sessions=[sess(100, SID_A, "src-a")], procs=procs,
+    )
+
+
+def test_hidden_helpers_are_counted_in_process_page_and_drill_in(tmp_path):
+    path = tmp_path / "snapshot.json"
+    write_snapshot(path, big_snapshot(300))
+
+    async def go():
+        app = FafoApp(path, refresh_s=0.25)
+        async with app.run_test(size=(144, 40)) as pilot:
+            await wait_read(pilot, app)
+            node = app.views.sessions[0]
+            assert node.collapsed == 300 and node.helpers_hidden == 44
+            app.state.toggle_expanded(SID_A)
+            for page in (
+                tui.build_procs_page(app.views, "", app.state.expanded),
+                tui.build_sessions_page(app.views, set(), "", app.state.expanded),
+            ):
+                texts = [str(i.a) for i in page.items if i.kind == "more"]
+                assert "+44 more helpers not shown" in texts
+            drill = tui.build_drill_page(app.views, SID_A, 120, app.state.expanded)
+            assert "+44 more helpers not shown" in [str(i.a).strip() for i in drill.items]
+            # collapsed: no hidden-helpers row anywhere
+            off = tui.build_procs_page(app.views, "", set())
+            assert not any("more helpers" in str(i.a) for i in off.items)
 
     asyncio.run(go())
