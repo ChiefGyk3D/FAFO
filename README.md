@@ -66,8 +66,17 @@ that Claude session. With no match, nothing is marked.
 
 ### Claude pane
 
-A Claude Code pane that reads the same snapshot is planned; it is not part of this repository
-yet.
+The Claude Code pane ships in this repository as the mod in `mods/claude-fafo` (plugin name
+`fafo-pane`). It shows the same view as the other renderers: a "you are here" line, source
+health, sessions with their commands, the local LLM, runners and quota. It does not read the
+snapshot. It reads `views.json`, which the collector writes next to the snapshot, one bounded
+read every 2 seconds, and it starts no process. Load it with
+`claude --plugin-dir mods/claude-fafo`; `/fafo` toggles the pane. A missing or bad file keeps
+the last good view or shows `collector not running`. See `mods/claude-fafo/README.md` for
+setup and the `viewsPath` option, and `docs/claude-pane-types.md` for the type definitions.
+
+CI type-checks the mod's hooks with a pinned TypeScript (the `Pane mod type-check` job). Its
+behavior tests run locally with `claude plugin test mods/claude-fafo`.
 
 ### Configuration
 
