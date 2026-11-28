@@ -1268,3 +1268,64 @@ def test_impossible_snapshot_with_no_previous_file_writes_nothing(tmp_path, monk
     monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 300)
     write_snapshot(p, _no_rows(make_snapshot()))
     assert not p.exists()
+
+
+# ---- sessions and health rows are never dropped or reshaped by the shrink ----
+
+def _many_rows(n: int = 300) -> Snapshot:
+    snap = _no_rows(make_snapshot())
+    base = snap.sessions[0]
+    snap.sessions = []
+    for i in range(n):
+        s = Session(**{**base.__dict__, "pid": 100 + i, "session_id": f"sid-{i:05d}",
+                       "name": f"n{i}", "address": f"a-{i:05d}", "project": Stamped(f"proj{i}", 1.0)})
+        s.task, s.branch, s.worktree = "t" * 5000, "b" * 5000, "w" * 5000
+        snap.sessions.append(s)
+    snap.health = [SourceHealth(f"h{i}", "ok", 1.0, "e" * 5000) for i in range(n)]
+    return snap
+
+
+def _identities(snap: Snapshot):
+    return (
+        [(s.pid, s.session_id, s.name, s.address, s.project.value) for s in snap.sessions],
+        [(h.name, h.status) for h in snap.health],
+    )
+
+
+def test_content_shrink_keeps_all_300_session_and_health_identities(tmp_path, monkeypatch):
+    p = tmp_path / "snap.json"
+    snap = _many_rows()
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 130_000)  # fits only at the deepest content pass
+    write_snapshot(p, snap)
+    monkeypatch.undo()
+    got = read_snapshot(p)
+    assert got is not None and p.stat().st_size <= 130_000
+    assert _identities(got) == _identities(snap)
+    assert all(len(s.task) < 5000 for s in got.sessions)
+
+
+def test_last_resort_keeps_every_identity_and_empties_the_rest(tmp_path, monkeypatch, caplog):
+    p = tmp_path / "snap.json"
+    snap = _many_rows()
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 100_000)  # below every content pass
+    with caplog.at_level("WARNING", logger="fafo.store"):
+        write_snapshot(p, snap)
+    monkeypatch.undo()
+    got = read_snapshot(p)
+    assert got is not None and p.stat().st_size <= 100_000
+    assert _identities(got) == _identities(snap)
+    assert all(s.task == "" and s.branch == "" for s in got.sessions)
+    assert "identities" in caplog.text and "ttttt" not in caplog.text
+
+
+def test_last_resort_row_count_cap_is_the_only_row_loss(tmp_path, monkeypatch):
+    p = tmp_path / "snap.json"
+    snap = _many_rows(20)
+    monkeypatch.setattr(store, "MAX_SNAPSHOT_BYTES", 6_000)
+    monkeypatch.setattr(store, "MAX_KEPT_ROWS", 5)
+    write_snapshot(p, snap)
+    monkeypatch.undo()
+    got = read_snapshot(p)
+    assert got is not None
+    assert [s.pid for s in got.sessions] == [100 + i for i in range(5)]
+    assert len(got.health) == 5

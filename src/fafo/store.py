@@ -167,21 +167,33 @@ def _trim_to_fit(plain: dict) -> bytes:
     base["procs"] = []
     base["runners"] = []
     for passes, (items, chars) in enumerate(_SHRINK_PASSES, 1):
-        doc = _shrink_doc(base, items, chars)
-        payload = _encode(doc)
+        payload = _encode(_shrink_doc(base, items, chars))
         if len(payload) <= MAX_SNAPSHOT_BYTES:
             _log.warning("snapshot: shrank non-row data in %d passes", passes)
             return payload
+    payload = _encode(_identity_only(base))
+    if len(payload) <= MAX_SNAPSHOT_BYTES:
+        _log.warning("snapshot: kept only row identities to fit")
     return payload
 
 
-# (list and mapping entries kept, string characters kept) per pass, mildest first. A fixed number
-# of passes, each one re-encoded: the work is bounded however hostile the input.
+# (nested list and mapping entries kept, string characters kept) per pass, mildest first. A fixed
+# number of passes, each one re-encoded: the work is bounded however hostile the input. These
+# passes never remove or reshape a session or health row; they cut only content inside rows and
+# the free-form host, quota and gpu data.
 _SHRINK_PASSES = ((256, 2048), (64, 512), (16, 128), (4, 32), (1, 16))
+# Identity strings (session id, address, name, project) are cut to this many characters, always.
+_IDENT_CHARS = 256
+# Last resort only: the most session rows and the most health rows kept. A snapshot with more
+# rows than this loses the excess tail rows, and only when everything else has failed to fit.
+MAX_KEPT_ROWS = 4096
+# Kept whole (up to _IDENT_CHARS): identity, plus short enumerations the reader checks.
+_SESSION_IDENT = ("session_id", "address", "name", "project_source")
+_HEALTH_IDENT = ("name", "status")
 
 
 def _shrink_value(v, items: int, chars: int, depth: int = 0):
-    """Copy of a plain JSON value with long lists, mappings and strings cut. Depth is already
+    """Copy of a free-form JSON value with long lists, mappings and strings cut. Depth is already
     capped by plain_copy; the guard here keeps the walk bounded regardless."""
     if depth > 40:
         return None
@@ -197,22 +209,50 @@ def _shrink_value(v, items: int, chars: int, depth: int = 0):
     return v
 
 
+def _shrink_row(row, chars: int, keep=()):
+    """A row with every key kept (the reader insists on the exact key set) and its strings cut.
+    Strings named in keep are identity and are cut only to _IDENT_CHARS."""
+    if type(row) is not dict:
+        return row
+    out = {}
+    for k, v in row.items():
+        if type(v) is str:
+            out[k] = v[:_IDENT_CHARS if k in keep else chars]
+        elif type(v) is dict:  # the stamped project: its value is identity
+            out[k] = _shrink_row(v, _IDENT_CHARS if k == "project" else chars, ("value",))
+        else:
+            out[k] = v
+    return out
+
+
 def _shrink_doc(plain: dict, items: int, chars: int) -> dict:
-    """Shrink every section the writer never drops (host, quota, gpu, llms, sessions, health)."""
+    """Shrink content only: the session, health and server lists keep every row."""
     doc = dict(plain)
     doc["host"] = _shrink_value(plain["host"], items, chars)
     doc["quota"] = _shrink_value(plain["quota"], items, chars)
     doc["llms"] = [
         {
-            **{k: _shrink_value(v, items, chars) for k, v in srv.items()},
-            "models": [_shrink_value(m, items, chars) for m in srv["models"][:items]],
-            "inflight": [_shrink_value(m, items, chars) for m in srv["inflight"][:items]],
+            **srv,
+            "models": [_shrink_row(m, chars) for m in srv["models"][:items]],
+            "inflight": [_shrink_row(m, chars) for m in srv["inflight"][:items]],
+            "gpu": _shrink_value(srv["gpu"], items, chars),
         }
         for srv in plain["llms"]
     ]
     doc["llm"] = doc["llms"][0] if doc["llms"] else None
-    doc["sessions"] = [_shrink_value(x, items, chars) for x in plain["sessions"]]
-    doc["health"] = [_shrink_value(x, items, chars) for x in plain["health"]]
+    doc["sessions"] = [_shrink_row(x, chars, _SESSION_IDENT) for x in plain["sessions"]]
+    doc["health"] = [_shrink_row(x, chars, _HEALTH_IDENT) for x in plain["health"]]
+    return doc
+
+
+def _identity_only(plain: dict) -> dict:
+    """Last resort: every session and health row keeps its identity and loses every other string;
+    host, quota, gpu, models and in-flight lists are emptied. At most MAX_KEPT_ROWS rows of each."""
+    doc = _shrink_doc(plain, 0, 0)
+    doc["sessions"] = [
+        _shrink_row(x, 0, _SESSION_IDENT) for x in plain["sessions"][:MAX_KEPT_ROWS]
+    ]
+    doc["health"] = [_shrink_row(x, 0, _HEALTH_IDENT) for x in plain["health"][:MAX_KEPT_ROWS]]
     return doc
 
 
