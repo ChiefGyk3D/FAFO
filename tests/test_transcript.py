@@ -648,3 +648,16 @@ def test_prompt_controls_before_a_run_do_not_expose_its_prefix(tmp_path):
     canary = "A1b2C3d4" * 12 + "Zq9w"
     got = prompt_label(tmp_path, chr(27) * 1990 + canary)
     assert got == "<redacted>"  # exact: an empty label (a swallowed error) must fail too
+
+
+def test_prompt_control_between_flag_and_value_hides_the_value(tmp_path):
+    canary = "Q7X2K9B4"  # made up, short: only the flag rule can hide it
+    got = prompt_label(tmp_path, "run --token" + chr(0) + canary + " now")
+    assert not set(got.replace("<redacted>", "")) & set(canary), got
+
+
+def test_file_tool_basename_control_between_flag_and_value_is_masked(tmp_path):
+    canary = "Q7X2K9B4"
+    put(tmp_path, [tool("Read", file_path="/tmp/x/--token" + chr(9) + canary)])
+    got = label(tmp_path)
+    assert got == "Read: --token <redacted>"

@@ -386,10 +386,11 @@ def mask_credentials(text: str) -> str:
     if not isinstance(text, str):
         return ""
     head = text[: MAX_REDACTED_LEN * 4]
-    words = _strip(head).split()
+    words = _visible(head).split()
     cut_word = len(words) - 1 if len(text) > len(head) and words else -1
     out: list[str] = []
     mask_next = False
+    key_before = False  # the previous word names a secret ("password"), so "=" or ":" may follow
     for index, raw in enumerate(words[: MAX_TOKENS * 16]):
         word = _normalize(raw)
         is_flag = word.startswith("-")
@@ -402,20 +403,45 @@ def mask_credentials(text: str) -> str:
             out.append(MASK)
         else:
             out.append(word)
-        # The word after a secret-named flag ("--token x", "-p x") or a header scheme is a value.
-        mask_next = word.lower().rstrip(":") in ("bearer", "basic", "authorization") or (
-            is_flag and "=" not in word and _secret_name(word.lstrip("-"))
+        key = word.rstrip("=:")
+        is_sep = word in ("=", ":")
+        # The word after a secret-named flag ("--token x", "-p x"), a header scheme, a secret
+        # key with its separator ("token=", "password:") or a separator after a secret key
+        # ("password = x", split by whitespace or controls) is a value.
+        mask_next = (
+            word.lower().rstrip(":") in ("bearer", "basic", "authorization")
+            or (is_flag and "=" not in word and _secret_name(word.lstrip("-")))
+            or (key != word and key != "" and _secret_name(key))
+            or (is_sep and key_before)
         )
+        key_before = not is_flag and not is_sep and key == word and _secret_name(word)
     return " ".join(out)
+
+
+_BREAK_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp", "Zs")
+
+
+def _visible(text: str) -> str:
+    """The text a reader sees, for masking: escape sequences are removed (a terminal hides them),
+    then every control, format, separator and whitespace character becomes one space, so that
+    a control between a key and its value splits them instead of gluing them together."""
+    s = _ESC_STRING.sub("", text)
+    s = _CSI.sub("", s)
+    s = _ESC_OTHER.sub("", s)
+    return "".join(
+        " " if ch.isspace() or unicodedata.category(ch) in _BREAK_CATEGORIES else ch for ch in s
+    )
 
 
 def masked_text(text: str, cap: int, bound: int = 64 * 1024) -> str:
     """Normalize, then mask credentials, then cut to `cap`.
 
-    Controls are removed first, over the whole input up to `bound` characters (the size of
-    a job file), so that a cut never lands before them and a run is judged as the reader
-    sees it. Cutting before masking would leave a credential prefix that the masker cannot
-    recognize. Callers that display text cut by `cap` should use this, not sanitize_text
-    after mask_credentials on a pre-cut string.
+    Controls, format characters and separators become single-space word breaks first, over
+    the input up to `bound` characters (the size of a job file), and runs collapse. So a
+    control between a key and its value splits them, never glues them, and a cut never lands
+    before the breaks. Then the words are masked, then any leftover control is stripped, then
+    the result is cut to `cap`. Callers that display text cut by `cap` should use this, not
+    sanitize_text after mask_credentials on a pre-cut string.
     """
-    return sanitize_text(mask_credentials(sanitize_text(text, bound)), cap)
+    flat = " ".join(_visible(text[:bound]).split())  # controls become word breaks, runs collapse
+    return sanitize_text(mask_credentials(flat), cap)  # mask, then strip leftovers, then cut

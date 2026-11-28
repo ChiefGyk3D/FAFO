@@ -471,3 +471,31 @@ def test_file_swapped_for_symlink_after_listing_is_refused(jd, monkeypatch):
     monkeypatch.setattr(codex_jobs, "_candidates", swap)
     s = collect(jd, show_titles=True).jobs
     assert s.running == 0 and s.invalid == 1 and "LINKED" not in repr(s)
+
+
+# -- controls and separators are word breaks in shown titles ---------------------------
+SEP_CANARY = "Q7X2K9B4"  # made up: short, uppercase and digits; key and flag rules only
+
+
+def _no_canary_chars(text: str) -> bool:
+    return not set(text.replace("<redacted>", "")) & set(SEP_CANARY)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "--token" + chr(0) + SEP_CANARY,
+        "--token" + chr(9) + SEP_CANARY,
+        "password" + chr(9) + "=" + chr(9) + SEP_CANARY,
+        "password" + chr(0) + "=" + chr(0) + SEP_CANARY,
+    ],
+)
+def test_title_control_between_key_and_value_hides_the_value(jd, title):
+    put(jd, "a.json", job("running", title=title))
+    t = collect(jd, show_titles=True).jobs.rows[0].title
+    assert "<redacted>" in t and _no_canary_chars(t)
+
+
+def test_title_benign_controls_keep_single_spaces(jd):
+    put(jd, "a.json", job("running", title="fix" + chr(9) + "the" + chr(0) + "bug"))
+    assert collect(jd, show_titles=True).jobs.rows[0].title == "fix the bug"
