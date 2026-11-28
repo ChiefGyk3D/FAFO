@@ -143,9 +143,7 @@ loaded models), `gm 1` (Gemini processes using at least 1% CPU), `rn 1/4` (runne
 total), `cp 1` (Copilot cloud runs running). A source whose last poll failed shows a trailing
 `!` (`ol!`), even when idle. When everything is idle the line is empty (just a newline).
 
-```
-fafo line [--width N] [--color] [--quiet] [--stale-after SECONDS]
-```
+Options: `--width N`, `--color`, `--quiet`, `--stale-after SECONDS` (and `--snapshot`, `--config`).
 
 - `--width N` (default 80, clamped to 3 to 300): the line never has more visible characters.
   Whole segments are dropped from the end and a cut ends in `...`; no segment is cut in half.

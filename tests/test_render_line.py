@@ -9,8 +9,16 @@ import pytest
 
 from fafo import cli
 from fafo.model import (
-    SNAPSHOT_VERSION, Inflight, LlmServer, LoadedModel, Proc, Runner, Session, Snapshot,
-    SourceHealth, Stamped,
+    SNAPSHOT_VERSION,
+    Inflight,
+    LlmServer,
+    LoadedModel,
+    Proc,
+    Runner,
+    Session,
+    Snapshot,
+    SourceHealth,
+    Stamped,
 )
 from fafo.render import commands
 from fafo.render.line import ACTIVE_CPU, ELLIPSIS, NO_COLLECTOR_MARK, render_line
