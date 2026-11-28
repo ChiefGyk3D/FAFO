@@ -260,10 +260,29 @@ def test_group_or_other_bits_refused(cache, mode):
     assert err_of(cache) == "refused"
 
 
-def test_foreign_owner_refused(cache, monkeypatch):
+def _fake_owner(monkeypatch, *, regular):
+    """fstat reports another owner, for regular files only or for directories only."""
+    real = os.fstat
+
+    def fstat(fd):
+        st = real(fd)
+        if stat.S_ISREG(st.st_mode) == regular:
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                   st.st_uid + 1, *st[5:]))
+        return st
+
+    monkeypatch.setattr(quota_claude.os, "fstat", fstat)
+
+
+def test_foreign_owner_file_refused(cache, monkeypatch):
     put(cache, good())
-    real = os.geteuid()
-    monkeypatch.setattr(quota_claude.os, "geteuid", lambda: real + 1)
+    _fake_owner(monkeypatch, regular=True)
+    assert err_of(cache) == "refused"
+
+
+def test_foreign_owner_parent_refused(cache, monkeypatch):
+    put(cache, good())
+    _fake_owner(monkeypatch, regular=False)
     assert err_of(cache) == "refused"
 
 
