@@ -117,7 +117,9 @@ What the hook writes: `<state dir>/codex-here/<codex pid>.json` with exactly `se
 `ppid` and `started_at`, atomically, mode 0600 in a 0700 directory. The state dir is the
 directory of the FAFO snapshot: `$XDG_RUNTIME_DIR/fafo`, else `~/.local/state/fafo` (the hook
 takes a different directory as its first argument; the collector reads the directory next to
-`snapshot_path`). Privacy: only the session id is recorded. The hook never reads
+`snapshot_path`). The state directory and `codex-here` are opened without following links and
+checked for owner and mode; the directories above the state directory are resolved once and
+trusted, so pass only a path you control. Privacy: only the session id is recorded. The hook never reads
 `transcript_path` or any other field, prints nothing and always exits 0.
 
 The collector reads those files read-only. It does not list the directory: for each live
