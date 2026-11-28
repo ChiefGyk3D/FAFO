@@ -84,6 +84,7 @@ def _codex(scfg: SourceCfg, cfg: Config, env: Mapping[str, str]) -> Source:
         show_args=set(cfg.show_args),
         args_mode=cfg.args_mode,
         value_flags=cfg.show_value_args,
+        here_dir=cfg.snapshot_path.parent / "codex-here",
     )
 
 

@@ -4,9 +4,9 @@ All four only read the snapshot file. A missing or unreadable snapshot is not an
 view model shows "collector not running" and the exit code is 0. Printed text is re-stripped of
 control characters here even though the view model already strips it (defense in depth).
 
-`--session auto` finds the current Claude session by process ancestry: from this process up
-through its parents, the nearest ancestor whose pid is the pid of a Claude session in the
-snapshot. It only works when the command runs from a terminal inside that session.
+`--session auto` finds the current Claude or Codex session by process ancestry: from this
+process up through its parents, the nearest ancestor whose pid is the pid of a Claude or Codex
+session in the snapshot (a Codex session exists only with the hook installed, see the README). It only works when the command runs from a terminal inside that session.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ TUI_HINT = "fafo: the tui needs Textual: pip install textual (or reinstall fafo 
 
 AUTO_HELP = (
     "session id to mark as 'you', or 'auto' to find it by process ancestry. auto only works "
-    "when the command is run from a terminal inside a Claude session; otherwise no session "
+    "when the command is run from a terminal inside a Claude or Codex session; otherwise no session "
     "is marked"
 )
 
@@ -103,12 +103,12 @@ def default_width() -> int:
 def find_current_session(
     sessions: Sequence[Session], start_pid: int, parent_of: Callable[[int], int | None]
 ) -> str | None:
-    """session_id of the NEAREST ancestor (start_pid itself first) that is a Claude session.
+    """session_id of the NEAREST ancestor (start_pid itself first) that is a Claude or Codex session.
 
     At most MAX_HOPS processes are examined; a repeated pid ends the walk (cycle); a lookup
     that fails or returns None ends it (vanished process).
     """
-    by_pid = {s.pid: s.session_id for s in sessions if s.agent == "claude" and s.pid > 0}
+    by_pid = {s.pid: s.session_id for s in sessions if s.agent in ("claude", "codex") and s.pid > 0}
     seen: set[int] = set()
     pid: int | None = start_pid
     for _ in range(MAX_HOPS):
