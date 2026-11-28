@@ -108,6 +108,11 @@ readers by design: the snapshot schema is strict, and the version number is not 
   and secret-looking words. A bare word that is a positional argument and does not follow a flag
   can still show. Safe mode shows more of each command line on screen, in snapshots and in
   screenshots, so it is off by default.
+- `show_value_args` lists the flags in `show_args` that take a value (default `--model` and
+  `--resume`). Only the token after a listed flag is shown, and it still goes through credential
+  masking and the 256-character cap. A flag shown but not listed is boolean: the next token stays
+  `<arg>`, in both `args_mode` settings. Entries must look like flag names (at most 32), and a
+  secret-named flag such as `--token` is a config error.
 - Secrets never go in the config file. A source that needs a token names an environment
   variable (`token_env`); the file is rejected if it contains a secret-looking key.
 - Everything printed passes through control-character stripping, so a hostile process name

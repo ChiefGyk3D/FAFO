@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .redact import ARGS_MODES
+from .redact import ARGS_MODES, _secret_name
 from .repospec import valid_repo
 
 SOURCE_NAMES = ("host", "claude", "codex", "gemini", "copilot", "ollama", "runners")
@@ -20,7 +20,18 @@ DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TIMEOUT_S = 5.0
 MAX_SECONDS = 86400
 DEFAULT_SHOW_ARGS = ("exec", "resume", "--resume", "--model")
-TOP_KEYS = {"snapshot_path", "show_args", "args_mode", "sources", "aliases"}
+# Shown flags whose next token is a value to show; a shown flag not listed here is boolean.
+DEFAULT_SHOW_VALUE_ARGS = ("--model", "--resume")
+MAX_SHOW_VALUE_ARGS = 32
+_VALUE_FLAG = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9-]{0,30}")
+TOP_KEYS = {
+    "snapshot_path",
+    "show_args",
+    "show_value_args",
+    "args_mode",
+    "sources",
+    "aliases",
+}
 SOURCE_KEYS = {"enabled", "interval_s", "timeout_s"}
 TASK_LABEL_MODES = ("off", "activity", "prompt")
 SECRET_WORDS = ("token", "password", "secret", "key")
@@ -62,6 +73,7 @@ class Config:
     snapshot_path: Path
     show_args: set[str]
     args_mode: str = "allowlist"
+    show_value_args: frozenset[str] = frozenset(DEFAULT_SHOW_VALUE_ARGS)
     _alias_re: re.Pattern[str] | None = field(default=None, repr=False, compare=False)
     _alias_map: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
@@ -302,6 +314,18 @@ def _validate_alias_keys(aliases: dict[str, str]) -> dict[str, str]:
     return lowered
 
 
+def _parse_show_value_args(value: object) -> frozenset[str]:
+    name = "'show_value_args'"
+    if not isinstance(value, list) or len(value) > MAX_SHOW_VALUE_ARGS:
+        raise _bad(name, f"must be a list of at most {MAX_SHOW_VALUE_ARGS} flag names")
+    for item in value:
+        if not isinstance(item, str) or _VALUE_FLAG.fullmatch(item) is None:
+            raise _bad(name, "must contain only flag names (one or two dashes, then a letter and up to 30 more)")
+        if _secret_name(item.lstrip("-")):
+            raise _bad(name, "must not contain flags with credential-like names: their values are never shown")
+    return frozenset(value)
+
+
 def load_config(path: Path | None) -> Config:
     data: dict = {}
     if path is not None:
@@ -330,6 +354,10 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(show, list) or not all(isinstance(a, str) for a in show):
         raise ConfigError("'show_args' must be a list of strings")
 
+    show_value = _parse_show_value_args(
+        data.get("show_value_args", list(DEFAULT_SHOW_VALUE_ARGS))
+    )
+
     args_mode = data.get("args_mode", "allowlist")
     if not isinstance(args_mode, str) or args_mode not in ARGS_MODES:
         raise ConfigError("'args_mode' must be \"allowlist\" or \"safe\"")
@@ -348,6 +376,7 @@ def load_config(path: Path | None) -> Config:
         snapshot_path=snapshot_path,
         show_args=set(show),
         args_mode=args_mode,
+        show_value_args=show_value,
         _alias_re=_compile_aliases(aliases),
         _alias_map=alias_map,
     )

@@ -213,8 +213,10 @@ class ClaudeSource:
         projects_dir: Path | str | None = None,
         task_labels: str = "activity",
         args_mode: str = "allowlist",
+        value_flags: frozenset[str] | None = None,
     ) -> None:
         self.args_mode = args_mode
+        self.value_flags = VALUE_FLAGS if value_flags is None else frozenset(value_flags)
         self.dir = Path(sessions_dir if sessions_dir is not None else DEFAULT_DIR).expanduser()
         # The projects directory sits next to the registry unless named.
         self.projects = (
@@ -353,7 +355,7 @@ class ClaudeSource:
                 session_pid=session_pid,
                 agent=_agent_of(argv, p.name()),
                 cmd=redact_argv(
-                    argv, self.show_args, value_flags=VALUE_FLAGS, mode=self.args_mode
+                    argv, self.show_args, value_flags=self.value_flags, mode=self.args_mode
                 ),
                 cpu=self._child_cpu(p),
                 rss=max(0, int(p.memory_info().rss)),

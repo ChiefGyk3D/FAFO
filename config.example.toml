@@ -18,6 +18,14 @@
 # Command arguments shown in the process view. Everything else is shown as <arg>.
 show_args = ["exec", "resume", "--resume", "--model"]
 
+# Which of the shown flags take a value. The token after such a flag is shown too, after
+# credential masking and the 256-character cap (a masked or longer value shows as <redacted>).
+# A flag in show_args but not listed here is boolean: the next token stays <arg>. In "safe"
+# mode this works the same way. Each entry is a flag name such as "--model" (at most 32
+# entries, letters, digits and - only); secret-named flags (token, key, password, ...) are
+# refused. Default: ["--model", "--resume"].
+# show_value_args = ["--model", "--resume"]
+
 # How much of each command line the process view shows.
 #   "allowlist" (default): only the executable and show_args above.
 #   "safe": also short bare words (status, run), flag names, and the base name of a script,
