@@ -370,7 +370,7 @@ def test_help_documents_auto_limit(capsys):
     with pytest.raises(SystemExit):
         cli.main(["table", "--help"])
     flat = " ".join(capsys.readouterr().out.split())
-    assert "terminal inside a Claude session" in flat
+    assert "terminal inside a Claude or Codex session" in flat
 
 
 # ---- example systemd unit ------------------------------------------------------------------
