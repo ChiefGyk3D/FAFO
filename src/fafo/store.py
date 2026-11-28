@@ -112,6 +112,9 @@ def write_snapshot(
         raise
 
 
+_MAX_NAME = 100  # longest identity name kept (LLM server and health row names)
+
+
 def _int(v):
     if type(v) is not int or v < 0 or v.bit_length() > MAX_INT_BITS:
         raise TypeError("expected non-negative int")
@@ -140,8 +143,10 @@ def _dict(v):
     check_finite(v)
 
 
-def _refuse_constant(name):
-    raise ValueError("non-standard JSON constant")
+def _constant(name):
+    """NaN and Infinity tokens parse to floats, so a typed field holding one is repaired like any
+    other bad number. Untyped dicts (host, quota, gpu) still refuse them in check_finite."""
+    return float(name)
 
 
 def _status(v):
@@ -152,6 +157,11 @@ def _status(v):
 def _project_source(v):
     if type(v) is not str or v not in get_args(ProjectSource):
         raise TypeError("bad project_source")
+
+
+def _health_name(v):
+    if type(v) is not str or len(v) > _MAX_NAME:
+        raise TypeError("bad health name")
 
 
 # Explicit scalar checks per dataclass; the key sets must match the dataclass fields exactly.
@@ -168,7 +178,7 @@ _SPEC = {
         "step": _str, "step_n": _int, "step_total": _int, "elapsed": _float,
         "load": _float, "mem": _float, "disk": _float,
     },
-    SourceHealth: {"name": _str, "status": _status, "last_ok": _float, "error": _str},
+    SourceHealth: {"name": _health_name, "status": _status, "last_ok": _float, "error": _str},
 }
 _SESSION_SPEC = {
     "pid": _int, "agent": _str, "session_id": _str, "project_rule": _str, "task": _str,
@@ -178,39 +188,96 @@ _SESSION_SPEC = {
 _SESSION_OPTIONAL = {"name": "", "address": "", "project_source": "live"}  # absent in older snapshots
 
 
-def _check(cls, data, spec):
-    """Require a dict with exactly the dataclass fields and valid scalar values."""
+class _Drop(Exception):
+    """A row whose identity field is bad: the row is dropped, never the file."""
+
+
+class _Tally:
+    """Counts only (never values) of what the reader repaired or dropped."""
+
+    def __init__(self) -> None:
+        self.fixed = 0
+        self.dropped = 0
+
+
+# A typed number that is null, non-finite or too wide is repaired to its documented default.
+_DEFAULTS = {_int: 0, _opt_int: None, _float: 0.0}
+# Identity fields: a row with a bad one is dropped (counted), because a default would invent a row.
+_IDENTITY = {
+    Proc: {"pid"},
+    Session: {"pid", "session_id"},
+    Runner: {"name"},
+    LlmServer: {"name"},
+    SourceHealth: {"name"},
+}
+
+
+def _check(cls, data, spec, tally):
+    """Require a dict with exactly the dataclass fields. Valid scalars pass through; a bad typed
+    number becomes its default (counted); any other bad value refuses the file (TypeError). A bad
+    identity field is only FLAGGED: the whole row (and its nested containers) must still validate,
+    so structural damage anywhere in a row refuses the file even when its identity is bad.
+    Returns (repaired copy, identity_bad); the caller drops the row after the full validation."""
     if type(data) is not dict:
         raise TypeError("expected object")
     if set(data) != {f.name for f in fields(cls)}:
         raise TypeError("field mismatch")
+    out = dict(data)
+    identity_bad = False
     for name, check in spec.items():
-        check(data[name])
+        try:
+            check(out[name])
+        except TypeError:
+            if name in _IDENTITY.get(cls, ()):
+                identity_bad = True
+                continue
+            if check not in _DEFAULTS:
+                raise
+            out[name] = _DEFAULTS[check]
+            tally.fixed += 1
+    return out, identity_bad
 
 
-def _build(cls, data):
-    _check(cls, data, _SPEC[cls])
-    return cls(**data)
+def _build(cls, data, tally):
+    out, identity_bad = _check(cls, data, _SPEC[cls], tally)
+    if identity_bad:
+        raise _Drop
+    return cls(**out)
 
 
-def _list(cls, data):
+def _rows(build, data, tally):
+    """Build every row; a row with a bad identity is dropped and counted. Entries are None for
+    dropped rows (so positions stay known); callers filter."""
     if type(data) is not list:
         raise TypeError("expected list")
-    return [_build(cls, item) for item in data]
+    out = []
+    for item in data:
+        try:
+            out.append(build(item))
+        except _Drop:
+            tally.dropped += 1
+            out.append(None)
+    return out
 
 
-def _session(data) -> Session:
+def _list(cls, data, tally):
+    return [r for r in _rows(lambda item: _build(cls, item, tally), data, tally) if r is not None]
+
+
+def _session(data, tally) -> Session:
     if type(data) is not dict:
         raise TypeError("bad session")
     data = {**_SESSION_OPTIONAL, **data}
-    _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None})
-    return Session(**{**data, "project": _build(Stamped, data["project"])})
+    out, identity_bad = _check(Session, data, {**_SESSION_SPEC, "project": lambda v: None}, tally)
+    project = _build(Stamped, out["project"], tally)  # validated before any drop
+    if identity_bad:
+        raise _Drop
+    return Session(**{**out, "project": project})
 
 
-def _session_list(data) -> list[Session]:
-    if type(data) is not list:
-        raise TypeError("expected list")
-    return [_session(item) for item in data]
+def _session_list(data, tally) -> list[Session]:
+    rows = _rows(lambda item: _session(item, tally), data, tally)
+    return [r for r in rows if r is not None]
 
 
 _LLM_NEW = {"name": "ollama", "last_ok": 0.0, "reachable": True}  # absent in version 1
@@ -227,47 +294,64 @@ def _bool(v):
         raise TypeError("expected bool")
 
 
-def _llm(data, *, old: bool = False) -> LlmServer | None:
+def _llm(data, tally, *, old: bool = False) -> LlmServer | None:
     if data is None:
         return None
     if old and type(data) is dict:
         data = {**_LLM_NEW, **data}
-    _check(
+    out, identity_bad = _check(
         LlmServer, data,
         {"queue": _int, "gpu": _dict, "name": _name, "last_ok": _float, "reachable": _bool},
+        tally,
     )
-    return LlmServer(
-        models=_list(LoadedModel, data["models"]),
-        queue=data["queue"],
-        inflight=_list(Inflight, data["inflight"]),
-        gpu=data["gpu"],
-        name=data["name"],
-        last_ok=data["last_ok"],
-        reachable=data["reachable"],
+    server = LlmServer(  # nested rows are validated here, before any drop decision
+        models=_list(LoadedModel, out["models"], tally),
+        queue=out["queue"],
+        inflight=_list(Inflight, out["inflight"], tally),
+        gpu=out["gpu"],
+        name=out["name"],
+        last_ok=out["last_ok"],
+        reachable=out["reachable"],
     )
+    if identity_bad:
+        raise _Drop
+    return server
 
 
-def _llms(doc, old: bool) -> list[LlmServer]:
+def _llms(doc, old: bool, tally) -> list[LlmServer]:
     """Version 1 has only "llm" (one server, no name). Version 2 has "llms" and "llm", and the
-    two must agree: "llm" is a copy of the first server kept for older readers."""
-    first = _llm(doc["llm"], old=old)
+    two must agree: "llm" is a copy of the first server kept for older readers. A server with a
+    bad name is dropped; "llm" is compared with the first listed server after the same repair
+    (both dropped, or both equal)."""
+    # "llm" is a copy: repair it with a scratch tally so its defects are not counted twice.
+    try:
+        first = _llm(doc["llm"], _Tally(), old=old)
+    except _Drop:
+        first = None
     if old:
-        return [] if first is None else [first]
+        if first is None:
+            if doc["llm"] is not None:
+                tally.dropped += 1
+            return []
+        return [_llm(doc["llm"], tally, old=True)]
     raw = doc["llms"]
     if type(raw) is not list or len(raw) > MAX_LLM_SERVERS:
         raise TypeError("bad llms")
-    servers: list[LlmServer] = []
+    servers: list[LlmServer | None] = []
     for item in raw:
-        s = _llm(item)
-        if s is None:
+        if item is None:
             raise TypeError("null server in llms")
-        servers.append(s)
+        try:
+            servers.append(_llm(item, tally))
+        except _Drop:
+            tally.dropped += 1
+            servers.append(None)
     if first != (servers[0] if servers else None):
         raise TypeError("llm does not match llms")
-    return servers
+    return [s for s in servers if s is not None]
 
 
-def _snapshot(doc) -> Snapshot:
+def _snapshot(doc, tally) -> Snapshot:
     if not isinstance(doc, dict):
         raise TypeError("expected object")
     version = doc.get("version")
@@ -279,19 +363,23 @@ def _snapshot(doc) -> Snapshot:
         want -= {"llms"}
     if set(doc) != want:
         raise TypeError("field mismatch")
-    _float(doc["taken"])
+    taken = doc["taken"]
+    try:
+        _float(taken)
+    except TypeError:
+        taken, tally.fixed = 0.0, tally.fixed + 1  # a bad clock reads as very old, not as a refusal
     _dict(doc["host"])
     _dict(doc["quota"])
     return Snapshot(
         version=SNAPSHOT_VERSION,
-        taken=doc["taken"],
+        taken=taken,
         host=doc["host"],
-        sessions=_session_list(doc["sessions"]),
-        procs=_list(Proc, doc["procs"]),
-        llms=_llms(doc, old),
-        runners=_list(Runner, doc["runners"]),
+        sessions=_session_list(doc["sessions"], tally),
+        procs=_list(Proc, doc["procs"], tally),
+        llms=_llms(doc, old, tally),
+        runners=_list(Runner, doc["runners"], tally),
         quota=doc["quota"],
-        health=_list(SourceHealth, doc["health"]),
+        health=_list(SourceHealth, doc["health"], tally),
     )
 
 
@@ -329,11 +417,20 @@ def _read_bounded(path: Path) -> bytes:
 def read_snapshot(path: Path) -> Snapshot | None:
     """Return the snapshot, or None if missing, truncated, invalid or an unknown version."""
     try:
-        doc = json.loads(_read_bounded(path), parse_constant=_refuse_constant)
-        return _snapshot(doc)
+        doc = json.loads(_read_bounded(path), parse_constant=_constant)
+        tally = _Tally()
+        snap = _snapshot(doc, tally)
+        if tally.fixed or tally.dropped:
+            # Counts only, never values: one bad number must not blank the display.
+            _log.warning(
+                "snapshot: repaired %d values, dropped %d rows", tally.fixed, tally.dropped
+            )
+        return snap
     except (
         OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
-        ArithmeticError, RecursionError,
-    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not)
+        ArithmeticError, RecursionError, RuntimeError, LookupError, AssertionError,
+    ) as exc:  # fail closed: parse or validation surprises are a refusal (MemoryError is not);
+        # an unexpected error class from a row validator is a refusal too, never a raise
+        # (a blanket `except Exception` is refused by the BLE001 lint, so the classes are named)
         _log.debug("snapshot unreadable: %s", type(exc).__name__)
         return None
