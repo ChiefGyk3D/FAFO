@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: Apache-2.0
+# Release path. A push of a v* tag builds the sdist and wheel through ChiefGyk3D/git-your-ship-together's
+# python-package-release.yml (same pin as ci.yml), attaches them with SBOMs and build provenance to the GitHub
+# release, and, only when the repository variable PYPI_PUBLISH is the string true, publishes to PyPI from the
+# `pypi` job below. PyPI Trusted Publishing cannot use a reusable workflow as the publisher, so that job lives
+# here and runs pypa/gh-action-pypi-publish as a direct step. See docs/RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the release. Only has an effect when the workflow is run on a v* tag.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@0e0cef39590d96f7c10217b969ab413e88d72024 # v1.39.0
+    permissions:
+      contents: write       # the GitHub release and its assets
+      id-token: write       # build provenance
+      attestations: write   # the provenance record
+    with:
+      # A branch run (dispatch without a tag) builds and checks only. A tag run publishes when it came from
+      # the tag push, or from a dispatch on that tag with the publish input set.
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish == true) }}
+      allowed-publish-events: push,workflow_dispatch
+      smoke-command: fafo --version
+      verify-command: grep -q "^## \[$VERSION\]" CHANGELOG.md
+      release-notes-command: awk -v v="$VERSION" '/^## \[/{p=index($0,"["v"]")>0; next} p' CHANGELOG.md
+      egress-policy: block
+
+  pypi:
+    name: Publish to PyPI
+    needs: package
+    # Nothing is sent to PyPI unless the repository variable PYPI_PUBLISH is exactly "true" and the ref is a version tag.
+    if: >-
+      vars.PYPI_PUBLISH == 'true' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name == 'push' || inputs.publish == true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi            # the name the Trusted Publisher on PyPI holds
+      url: https://pypi.org/p/fafo
+    permissions:
+      contents: read
+      id-token: write       # PyPI Trusted Publishing; the OIDC token names THIS workflow file
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            api.github.com:443
+            files.pythonhosted.org:443
+            fulcio.sigstore.dev:443
+            ghcr.io:443
+            github.com:443
+            pkg-containers.githubusercontent.com:443
+            productionresultssa12.blob.core.windows.net:443
+            pypi.org:443
+            rekor.sigstore.dev:443
+            release-assets.githubusercontent.com:443
+            timestamp.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+            upload.pypi.org:443
+            uploads.github.com:443
+          disable-sudo: true
+          disable-telemetry: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      # A direct step: the action is a Docker action and cannot sit inside a composite or reusable workflow.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          attestations: true
